@@ -1,0 +1,32 @@
+jpegblur - "lossless" "blurring" of regions in JPEG image
+=========================================================
+
+jpegblur is a program "heavily based on" (read 80% copied from)
+jpegtran (jpegtran is a program distributed with libjpeg for lossless
+transformation of JPEG files) to blur regions of a JPEG image while
+minimising changes in the image file.
+
+jpegblur takes bounding boxes from command line and returns a JPEG
+image with those regions blurred.  It does this in DCT space thus
+avoiding the introduction of new compression artefacts.  It also
+preserves all metadata by copying all extra markers.
+
+The purpose of this program is to redact Personally Identifiable
+Information (PII) while avoiding any other changes to the image file.
+Do note that there may be PII on the metadata and it will be copied
+across untouched.  Some other tool can be used to inspect the
+metadata.
+
+Usage
+-----
+
+    jpegblur [xi,yi,width,height ...] < input.jpg > output.jpg
+
+See the source code for a man page style documentation.
+
+Build
+-----
+
+There is a `Makefile`.  With a single C++ file and single dependency
+on libjpeg, the build is relatively simple and no attempt has been
+made to cover special cases.  Probably only builds on Linux.

@@ -174,15 +174,15 @@ blur_regions(jpeg_decompress_struct *srcinfo,
 {
   // We are doing the indexing in MCU coordinates and not in pixels
   // (one MCU corresponds to 8x8 pixels).
-  int start_col = bb.xi / 8;
-  int ncols = bb.width / 8;
-  if (bb.width % 8 != 0)
-    ncols++;
+  const int start_col = bb.xi / 8;
+  const int end_col_pixel = bb.xi + bb.width;
+  const int end_col = end_col_pixel % 8 ? ((end_col_pixel /8) +1) : (end_col_pixel /8);
+  const int ncols = end_col - start_col;
 
-  int start_row = bb.yi / 8;
-  int nrows = bb.height / 8;
-  if (bb.height % 8 != 0)
-    nrows++;
+  const int start_row = bb.yi / 8;
+  const int end_row_pixel = bb.yi + bb.height;
+  const int end_row = end_row_pixel % 8 ? ((end_row_pixel /8) +1) : (end_row_pixel /8);
+  const int nrows = end_row - start_row;
 
   // In addition of "destroying" each MCU information to only use the
   // first coefficient, we also join adjacent MCUs so that each region
@@ -228,7 +228,7 @@ blur_regions(jpeg_decompress_struct *srcinfo,
     // access_virt_barray but I keep getting "Bogus virtual array
     // access".  Use a for loop then.
     for (int ri = start_row; ri < start_row + nrows; ++ri) {
-      int rel_ri = ri - start_row;
+      const int rel_ri = ri - start_row;
       bool is_first_row_mcu_in_block;
       if (rel_ri < mcu_rows_merged_xl)
         is_first_row_mcu_in_block = (rel_ri % mcu_rows_per_xl_block) == 0;

@@ -96,92 +96,166 @@
 #include <jpeglib.h>
 
 
-typedef struct {
-  int xi;
-  int yi;
-  int width;
-  int height;
-} BoundingBox;
+class BoundingBox {
+public:
+  const int xi;
+  const int yi;
+  const int width;
+  const int height;
 
+  BoundingBox(const int xi, const int yi, const int width, const int height)
+     : xi{xi}, yi{yi}, width{width}, height{height}
+  {}
 
-BoundingBox
-parse_bounding_box(const std::string arg)
-{
-  BoundingBox bb;
-  std::stringstream argss (arg);
-  std::string sep ("   ");
-  if (! (argss >> bb.xi >> sep[0]
-               >> bb.yi >> sep[1]
-               >> bb.width >> sep[2]
-               >> bb.height)
-      || sep != ",,,"
-      || ! argss.eof())
-    throw std::invalid_argument("failed to parse BB from '" + arg + "'");
-  return bb;
-}
-
-
-
-// Setup decompression object to save desired markers in memory.
-void
-save_markers(jpeg_decompress_struct *srcinfo)
-{
-  jpeg_save_markers(srcinfo, JPEG_COM, 0xFFFF);
-  for (int m = 0; m < 16; m++)
-    jpeg_save_markers(srcinfo, JPEG_APP0 + m, 0xFFFF);
-}
-
-
-// Copy markers saved in the given source object to the destination object.
-//
-// This should be called just after jpeg_start_compress() or
-// jpeg_write_coefficients().  Note that those routines will have
-// written the SOI, and also the JFIF APP0 or Adobe APP14 markers if
-// selected so we need to skip those.
-void
-copy_markers(jpeg_decompress_struct *srcinfo, jpeg_compress_struct *dstinfo)
-{
-  jpeg_saved_marker_ptr marker;
-  for (marker = srcinfo->marker_list; marker != NULL; marker = marker->next) {
-    if (dstinfo->write_JFIF_header &&
-        marker->marker == JPEG_APP0 &&
-        marker->data_length >= 5 &&
-        marker->data[0] == 0x4A &&
-        marker->data[1] == 0x46 &&
-        marker->data[2] == 0x49 &&
-        marker->data[3] == 0x46 &&
-        marker->data[4] == 0)
-      continue;                 // reject duplicate JFIF
-    if (dstinfo->write_Adobe_marker &&
-        marker->marker == JPEG_APP0 + 14 &&
-        marker->data_length >= 5 &&
-        marker->data[0] == 0x41 &&
-        marker->data[1] == 0x64 &&
-        marker->data[2] == 0x6F &&
-        marker->data[3] == 0x62 &&
-        marker->data[4] == 0x65)
-      continue;                 // reject duplicate Adobe
-    jpeg_write_marker(dstinfo, marker->marker, marker->data,
-                      marker->data_length);
+  static BoundingBox
+  from_cmdline_arg(const std::string& arg)
+  {
+    int xi, yi, width, height;
+    std::stringstream argss(arg);
+    std::string sep("   ");
+    if (! (argss >> xi >> sep[0]
+           >> yi >> sep[1]
+           >> width >> sep[2]
+           >> height)
+        || sep != ",,,"
+        || ! argss.eof())
+      throw std::invalid_argument("failed to parse BB from '" + arg + "'");
+  return BoundingBox{xi, yi, width, height};
   }
-}
+
+  // New BB expanded to include all MCUs under the original BB.
+  BoundingBox
+  expanded_to_MCU() const
+  {
+    const int x_xi = xi /8 *8;
+    const int x_yi = yi /8 *8;
+    const int x_width = (width + xi - x_xi + (8 -1)) /8 *8;
+    const int x_height = (height + yi - x_yi + (8 -1)) /8 *8;
+    return BoundingBox{x_xi, x_yi, x_width, x_height};
+  }
+};
+
+
+class JPEGDecompressor {
+private:
+  struct jpeg_error_mgr jerr;
+
+  // Setup decompression object to save all markers in memory.
+  void
+  save_markers()
+  {
+    jpeg_save_markers(&info, JPEG_COM, 0xFFFF);
+    for (int m = 0; m < 16; m++)
+      jpeg_save_markers(&info, JPEG_APP0 + m, 0xFFFF);
+  }
+
+public:
+  struct jpeg_decompress_struct info;
+
+  JPEGDecompressor(std::FILE *file)
+  {
+    info.err = jpeg_std_error(&jerr);
+    jpeg_create_decompress(&info);
+    jpeg_stdio_src(&info, file);
+
+    save_markers();
+    jpeg_read_header(&info, TRUE);
+  }
+
+  bool
+  maybe_has_jfif_thumbnail()
+  {
+    // Being a JFIF version 1.02, this file might have a thumbnail.
+    // Even if it has no thumbnail in the JFIF marker, it might still
+    // have a thumbnail on some other marker.
+    return info.JFIF_minor_version > 1;
+  }
+
+  bool
+  is_progressive()
+  {
+    return info.progressive_mode;
+  }
+
+  ~JPEGDecompressor()
+  {
+    jpeg_finish_decompress(&info);
+    jpeg_destroy_decompress(&info);
+  }
+};
+
+
+class JPEGCompressor {
+private:
+  struct jpeg_error_mgr jerr;
+
+public:
+  struct jpeg_compress_struct info;
+
+  JPEGCompressor(std::FILE *file)
+  {
+    info.err = jpeg_std_error(&jerr);
+    jpeg_create_compress(&info);
+    jpeg_stdio_dest(&info, file);
+  }
+
+  // Copy markers saved in the given source object to the destination object.
+  //
+  // This should be called just after jpeg_start_compress() or
+  // jpeg_write_coefficients().  Note that those routines will have
+  // written the SOI, and also the JFIF APP0 or Adobe APP14 markers if
+  // selected so we need to skip those.
+  void
+  copy_markers_from(const JPEGDecompressor& src)
+  {
+    for (jpeg_saved_marker_ptr marker = src.info.marker_list; marker != NULL;
+         marker = marker->next) {
+      if (info.write_JFIF_header &&
+          marker->marker == JPEG_APP0 &&
+          marker->data_length >= 5 &&
+          marker->data[0] == 0x4A &&
+          marker->data[1] == 0x46 &&
+          marker->data[2] == 0x49 &&
+          marker->data[3] == 0x46 &&
+          marker->data[4] == 0)
+        continue;                 // reject duplicate JFIF
+      if (info.write_Adobe_marker &&
+          marker->marker == JPEG_APP0 + 14 &&
+          marker->data_length >= 5 &&
+          marker->data[0] == 0x41 &&
+          marker->data[1] == 0x64 &&
+          marker->data[2] == 0x6F &&
+          marker->data[3] == 0x62 &&
+          marker->data[4] == 0x65)
+        continue;                 // reject duplicate Adobe
+      jpeg_write_marker(&info, marker->marker, marker->data,
+                        marker->data_length);
+    }
+  }
+
+  ~JPEGCompressor()
+  {
+    jpeg_finish_compress(&info);
+    jpeg_destroy_compress(&info);
+  }
+};
 
 
 void
-blur_regions(jpeg_decompress_struct *srcinfo,
+blur_regions(const JPEGDecompressor& src,
              jvirt_barray_ptr *src_coeffs_array,
              const BoundingBox& bb)
 {
+  const BoundingBox mcu_bb = bb.expanded_to_MCU();
+
   // We are doing the indexing in MCU coordinates and not in pixels
   // (one MCU corresponds to 8x8 pixels).
-  const int start_col = bb.xi / 8;
-  const int end_col_pixel = bb.xi + bb.width;
-  const int end_col = end_col_pixel % 8 ? ((end_col_pixel /8) +1) : (end_col_pixel /8);
+  const int start_col = mcu_bb.xi / 8;
+  const int end_col = start_col + (mcu_bb.width /8);
   const int ncols = end_col - start_col;
 
-  const int start_row = bb.yi / 8;
-  const int end_row_pixel = bb.yi + bb.height;
-  const int end_row = end_row_pixel % 8 ? ((end_row_pixel /8) +1) : (end_row_pixel /8);
+  const int start_row = mcu_bb.yi / 8;
+  const int end_row = start_row + (mcu_bb.height /8);
   const int nrows = end_row - start_row;
 
   // In addition of "destroying" each MCU information to only use the
@@ -221,7 +295,7 @@ blur_regions(jpeg_decompress_struct *srcinfo,
   // Memory of at most row coeffs to copy across.
   std::vector<JCOEF> row_coeffs (8);
 
-  for (int comp_i = 0; comp_i < srcinfo->num_components; ++comp_i) {
+  for (int comp_i = 0; comp_i < src.info.num_components; ++comp_i) {
     // jpeg_component_info *comp_info = srcinfo->comp_info + comp_i;
 
     // Should be possible to specify the number of rows in
@@ -236,7 +310,7 @@ blur_regions(jpeg_decompress_struct *srcinfo,
         is_first_row_mcu_in_block = ((rel_ri - mcu_rows_merged_xl)
                                      % mcu_rows_per_block) == 0;
 
-      JBLOCKARRAY buf = srcinfo->mem->access_virt_barray((j_common_ptr)srcinfo,
+      JBLOCKARRAY buf = src.info.mem->access_virt_barray((j_common_ptr)&src.info,
                                                          src_coeffs_array[comp_i],
                                                          ri, 1, TRUE);
       for (int ci = 0; ci < ncols; ++ci) {
@@ -269,19 +343,8 @@ int
 jpegblur(std::FILE *srcfile, std::FILE *dstfile,
          const std::vector<BoundingBox>& bounding_boxes)
 {
-  // Setup source
-  struct jpeg_decompress_struct srcinfo;
-  struct jpeg_error_mgr srcjerr;
-  srcinfo.err = jpeg_std_error(&srcjerr);
-  jpeg_create_decompress(&srcinfo);
-  jpeg_stdio_src(&srcinfo, srcfile);
-
-  // Setup destination
-  struct jpeg_compress_struct dstinfo;
-  struct jpeg_error_mgr dstjerr;
-  dstinfo.err = jpeg_std_error(&dstjerr);
-  jpeg_create_compress(&dstinfo);
-  jpeg_stdio_dest(&dstinfo, dstfile);
+  JPEGDecompressor src {srcfile};
+  JPEGCompressor dst {dstfile};
 
   // XXX: the order of operations is quite sensitive to ensure that we
   // get an output file as similar as possible as the input.  To test
@@ -291,8 +354,8 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
   // for others so test it in a whole dataset.
   //
   // To be honest, why this order is required is not clear to me and
-  // this copied is mainly lifted from libjpeg's `jpegtran.c`.  The
-  // order is:
+  // the code is mainly lifted from libjpeg's `jpegtran.c`.  The order
+  // is:
   //
   //   1. save_markers
   //   2. jpeg_read_header
@@ -308,43 +371,30 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
   //
   //   * save_markers must happen before jpeg_read_header
 
-  save_markers(&srcinfo);
-
-  jpeg_read_header(&srcinfo, TRUE);
-  if (srcinfo.JFIF_minor_version > 1) {
-    // Being a JFIF version 1.02, this file might have a thumbnail.
-    // We don't support blurring the thumbnail as well.
-    fputs("This being JFIF>=1.02 might have a thumbnail.\n", stderr);
-    // TODO: clear up memory
+  if (src.maybe_has_jfif_thumbnail()) {
+    fputs("This image might have a thumbnail.\n", stderr);
     return 1;
-  } else if (srcinfo.progressive_mode) {
+  } else if (src.is_progressive()) {
     fputs("This file has progressive mode.\n", stderr);
-    // TODO: clear up memory
     return 1;
   }
 
-  jvirt_barray_ptr *src_coef_arrays = jpeg_read_coefficients(&srcinfo);
-  jpeg_copy_critical_parameters(&srcinfo, &dstinfo);
+  jvirt_barray_ptr *src_coef_arrays = jpeg_read_coefficients(&src.info);
+  jpeg_copy_critical_parameters(&src.info, &dst.info);
 
   for (auto bb : bounding_boxes)
-    blur_regions(&srcinfo, src_coef_arrays, bb);
+    blur_regions(src, src_coef_arrays, bb);
 
   // We don't know if coding was optimised on the input file.  Ideally
   // we would use exactly the same options but failing that, let us
   // optimise for disk space.
-  dstinfo.optimize_coding = TRUE;
+  dst.info.optimize_coding = TRUE;
 
-  dstinfo.arith_code = srcinfo.arith_code;
+  dst.info.arith_code = src.info.arith_code;
 
-  jpeg_write_coefficients(&dstinfo, src_coef_arrays);
+  jpeg_write_coefficients(&dst.info, src_coef_arrays);
 
-  copy_markers(&srcinfo, &dstinfo);
-
-  jpeg_finish_compress(&dstinfo);
-  jpeg_destroy_compress(&dstinfo);
-
-  jpeg_finish_decompress(&srcinfo);
-  jpeg_destroy_decompress(&srcinfo);
+  dst.copy_markers_from(src);
 
   return 0;
 }
@@ -358,7 +408,7 @@ main(int argc, char *argv[])
 
   std::vector<BoundingBox> bounding_boxes;
   for (int i = 1; i < argc; ++i)
-    bounding_boxes.push_back(parse_bounding_box(argv[i]));
+    bounding_boxes.push_back(BoundingBox::from_cmdline_arg(argv[i]));
 
   return jpegblur(infile, outfile, bounding_boxes);
 }

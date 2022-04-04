@@ -1,2 +1,2 @@
 jpegblur: jpegblur.cc
-	c++ -ljpeg $< -o $@
+	c++ -ljpeg -lopencv_core -lopencv_imgproc $< -o $@

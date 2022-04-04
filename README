@@ -27,6 +27,6 @@ See the source code for a man page style documentation.
 Build
 -----
 
-There is a `Makefile`.  With a single C++ file and single dependency
-on libjpeg, the build is relatively simple and no attempt has been
-made to cover special cases.  Probably only builds on Linux.
+There is a `Makefile`.  With a single C++ file and dependency on
+libjpeg and OpenCV, the build is relatively simple and no attempt has
+been made to cover special cases.  Probably only works on Linux.

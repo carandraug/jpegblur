@@ -86,6 +86,8 @@
 //         jpegblur < foo.jpg > bar.jpg
 //         md5sum foo.jpg bar.jpg
 
+#include <algorithm>
+#include <array>
 #include <cstdio>
 #include <iostream>
 #include <sstream>
@@ -94,6 +96,8 @@
 #include <vector>
 
 #include <jpeglib.h>
+#include <opencv2/core/mat.hpp>
+#include <opencv2/imgproc.hpp>
 
 
 class BoundingBox {
@@ -160,6 +164,12 @@ public:
 
     save_markers();
     jpeg_read_header(&info, TRUE);
+
+    // We use buffered-image mode because we want to keep the
+    // full-image coefficient array in memory.  If not, coefficients
+    // are discarded as we scan each line of the image.
+    info.buffered_image = TRUE;
+
   }
 
   bool
@@ -175,6 +185,55 @@ public:
   is_progressive()
   {
     return info.progressive_mode;
+  }
+
+  JBLOCKARRAY
+  get_coeff_for_row(const int component_idx, const int row_idx)
+  {
+    jvirt_barray_ptr *coeff_arrays = jpeg_read_coefficients(&info);
+    // Should be possible to specify the number of rows in
+    // access_virt_barray but I keep getting "Bogus virtual array
+    // access".
+    return info.mem->access_virt_barray((j_common_ptr)&info,
+                                        coeff_arrays[component_idx],
+                                        row_idx, 1, TRUE);
+  }
+
+  cv::Mat
+  to_image()
+  {
+    const std::vector<int> sz{info.image_height,
+                              info.image_width,
+                              info.num_components};
+
+    cv::Mat rgb;
+    if (sizeof(JSAMPLE) == 1)
+      rgb = cv::Mat(sz, CV_8UC1);
+    else  // libjpeg built with BITS_IN_JSAMPLE == 12
+      rgb = cv::Mat(sz, CV_16UC1);
+
+    // We are not dealing with progressive images and only use
+    // buffered-image to keep all coefficients in memory.  So we can
+    // just specify scan=1 and assume we are dealing with the full
+    // resolution image/scan.
+    jpeg_start_decompress(&info);
+    jpeg_start_output(&info, 1);
+
+    const int row_stride = rgb.size[1] * rgb.size[2];
+    JSAMPARRAY buffer = info.mem->alloc_sarray((j_common_ptr)&info,
+                                               JPOOL_IMAGE, row_stride, 1);
+
+    int line_i = 0;
+    while (info.output_scanline < info.output_height) {
+      jpeg_read_scanlines(&info, buffer, 1);
+      for (int i = 0; i < row_stride; i++)
+        rgb.data[line_i*row_stride + i] = buffer[0][i];
+
+      ++line_i;
+    }
+
+    jpeg_finish_output(&info);
+    return rgb;
   }
 
   ~JPEGDecompressor()
@@ -197,6 +256,12 @@ public:
     info.err = jpeg_std_error(&jerr);
     jpeg_create_compress(&info);
     jpeg_stdio_dest(&info, file);
+  }
+
+  void
+  copy_critical_parameters_from(JPEGDecompressor& src)
+  {
+    jpeg_copy_critical_parameters(&src.info, &info);
   }
 
   // Copy markers saved in the given source object to the destination object.
@@ -233,6 +298,13 @@ public:
     }
   }
 
+  void
+  copy_coefficients_from(JPEGDecompressor& src)
+  {
+    jvirt_barray_ptr *src_coef_arrays = jpeg_read_coefficients(&src.info);
+    jpeg_write_coefficients(&info, src_coef_arrays);
+  }
+
   ~JPEGCompressor()
   {
     jpeg_finish_compress(&info);
@@ -241,11 +313,110 @@ public:
 };
 
 
-void
-blur_regions(const JPEGDecompressor& src,
-             jvirt_barray_ptr *src_coeffs_array,
-             const BoundingBox& bb)
+// FIXME: this should be done some other way.
+class JPEGFileDecompressor : public JPEGDecompressor {
+private:
+  const std::string fpath;
+
+public:
+  JPEGFileDecompressor(const std::string& fpath)
+    : fpath{fpath}, JPEGDecompressor(std::fopen(fpath.c_str(), "rb"))
+  {}
+
+  static JPEGFileDecompressor
+  from_image(const cv::Mat& img, JPEGDecompressor& src)
+  {
+    // FIXME: we shouldn't use tmpnam
+    std::string fpath {std::tmpnam(nullptr)};
+    FILE* outfp = std::fopen(fpath.c_str(), "wb");
+
+    // This is all on its own block so that ~JPEGCompressor is called
+    // at the end and we can then fclose.
+    {
+      JPEGCompressor dst {outfp};
+      dst.copy_critical_parameters_from(src);
+      dst.info.in_color_space = JCS_RGB;
+      dst.info.optimize_coding = TRUE;
+      jpeg_start_compress(&dst.info, TRUE);
+
+      JSAMPROW row_pointer[1];
+      const int row_stride = img.size[1] * img.size[2];
+      while (dst.info.next_scanline < dst.info.image_height) {
+        row_pointer[0] = &img.data[dst.info.next_scanline * row_stride];
+        jpeg_write_scanlines(&dst.info, row_pointer, 1);
+      }
+    }
+    std::fclose(outfp);
+
+    return JPEGFileDecompressor{fpath};
+  }
+
+  ~JPEGFileDecompressor()
+  {
+    std::remove(fpath.c_str());
+  }
+};
+
+
+// Blur image with a kernel appropriate for the largest bounding box.
+cv::Mat
+blur_image(const cv::Mat& src, const std::vector<BoundingBox>& bounding_boxes)
 {
+  std::vector<int> lengths;
+  std::vector<double> sigmas;
+  int length = 0;
+  double sigma = 0.0;
+  for (auto bb : bounding_boxes) {
+    length = std::max<int>({length, bb.width /2, bb.height /2});
+    sigma = std::max<double>({sigma, bb.width /10., bb.height /10.});
+  }
+  if (length % 2 == 0)  // OpenCV requires kernel length to be odd
+    ++length;
+
+  // Gaussian blur only handles 2D arrays so merge the channels.
+  cv::Mat dst = src.clone();
+  cv::GaussianBlur(src.reshape(3, 2, src.size.p),
+                   dst.reshape(3, 2, src.size.p),
+                   cv::Size(length, length), sigma, sigma,
+                   cv::BorderTypes::BORDER_REPLICATE);
+  return dst;
+}
+
+
+void
+copy_region_from(JPEGDecompressor& dst, JPEGFileDecompressor& blurred,
+                 const BoundingBox& bb)
+{
+  // We are doing the indexing in MCU coordinates and not in pixels
+  // (one MCU corresponds to 8x8 pixels).
+  const int start_col = bb.xi / 8;
+  const int end_col = start_col + (bb.width /8);
+
+  const int start_row = bb.yi / 8;
+  const int end_row = start_row + (bb.height /8);
+
+  for (int comp_i = 0; comp_i < dst.info.num_components; ++comp_i) {
+    for (int row_i = start_row; row_i < end_row+1; ++row_i) {
+      JBLOCKARRAY dst_buf = dst.get_coeff_for_row(comp_i, row_i);
+      JBLOCKARRAY src_buf = blurred.get_coeff_for_row(comp_i, row_i);
+
+      for (int col_i = start_col; col_i < end_col +1; ++col_i)
+        for (int i = 0; i < DCTSIZE2; ++i)
+          dst_buf[0][col_i][i] = src_buf[0][col_i][i];
+    }
+  }
+}
+
+
+// TODO: this function is dead code but I want to clean it up and make
+// it an option.  It's much faster than bluring and does not require
+// opencv.
+void
+pixelate_regions(const JPEGDecompressor& src,
+                 jvirt_barray_ptr *src_coeffs_array,
+                 const BoundingBox& bb)
+{
+  // TODO: this needs to be expanded before
   const BoundingBox mcu_bb = bb.expanded_to_MCU();
 
   // We are doing the indexing in MCU coordinates and not in pixels
@@ -343,8 +514,35 @@ int
 jpegblur(std::FILE *srcfile, std::FILE *dstfile,
          const std::vector<BoundingBox>& bounding_boxes)
 {
+  // The rest of the code expects bounding boxes to lie on MCU limits.
+  // We expand it here but they don't do any check.  We should have a
+  // separate type for such MCU expanded BB.
+  std::vector<BoundingBox> xl_bounding_boxes;
+  for (auto bb : bounding_boxes)
+    xl_bounding_boxes.push_back(bb.expanded_to_MCU());
+
   JPEGDecompressor src {srcfile};
+
+  if (src.maybe_has_jfif_thumbnail()) {
+    std::cerr << "This image might have a thumbnail.\n";
+    return 1;
+  } else if (src.is_progressive()) {
+    std::cerr << "This file has progressive mode.\n";
+    return 1;
+  }
+
   JPEGCompressor dst {dstfile};
+
+  if (xl_bounding_boxes.size()) {
+    const cv::Mat blurred_img = blur_image(src.to_image(), xl_bounding_boxes);
+    // FIXME: this should be just a JPEGDecompressor, no need to
+    // specialized class, go make it virtual.
+    JPEGFileDecompressor blurred = JPEGFileDecompressor::from_image(blurred_img,
+                                                                    src);
+
+    for (auto bb : xl_bounding_boxes)
+      copy_region_from(src, blurred, bb);
+  }
 
   // XXX: the order of operations is quite sensitive to ensure that we
   // get an output file as similar as possible as the input.  To test
@@ -353,37 +551,13 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
   // just because it works for one file, does not mean it will work
   // for others so test it in a whole dataset.
   //
-  // To be honest, why this order is required is not clear to me and
-  // the code is mainly lifted from libjpeg's `jpegtran.c`.  The order
-  // is:
-  //
-  //   1. save_markers
-  //   2. jpeg_read_header
-  //   3. jpeg_copy_critical_parameters
-  //   4. set dstinfo.optimize_coding
-  //   5. jpeg_wrie_coefficients
-  //   6. copy_markers
-  //
   // Some things that I have already found cause issues:
   //
   //   * Setting dstinfo.optimize_coding must happen after calling
   //     jpeg_copy_critical_parameters
   //
   //   * save_markers must happen before jpeg_read_header
-
-  if (src.maybe_has_jfif_thumbnail()) {
-    fputs("This image might have a thumbnail.\n", stderr);
-    return 1;
-  } else if (src.is_progressive()) {
-    fputs("This file has progressive mode.\n", stderr);
-    return 1;
-  }
-
-  jvirt_barray_ptr *src_coef_arrays = jpeg_read_coefficients(&src.info);
-  jpeg_copy_critical_parameters(&src.info, &dst.info);
-
-  for (auto bb : bounding_boxes)
-    blur_regions(src, src_coef_arrays, bb);
+  dst.copy_critical_parameters_from(src);
 
   // We don't know if coding was optimised on the input file.  Ideally
   // we would use exactly the same options but failing that, let us
@@ -392,8 +566,7 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
 
   dst.info.arith_code = src.info.arith_code;
 
-  jpeg_write_coefficients(&dst.info, src_coef_arrays);
-
+  dst.copy_coefficients_from(src);
   dst.copy_markers_from(src);
 
   return 0;
@@ -407,8 +580,20 @@ main(int argc, char *argv[])
   std::FILE *outfile = stdout;
 
   std::vector<BoundingBox> bounding_boxes;
-  for (int i = 1; i < argc; ++i)
-    bounding_boxes.push_back(BoundingBox::from_cmdline_arg(argv[i]));
+  bool do_pixelation = false;
+
+  for (int i = 1; i < argc; ++i) {
+    std::string arg {argv[i]};
+    if (i == 1 && arg == "--pixelate")
+      do_pixelation = true;
+    else
+      bounding_boxes.push_back(BoundingBox::from_cmdline_arg(arg));
+  }
+
+  if (do_pixelation) {
+    std::cerr << "Pixelation code path not merged in yet.\n";
+    return 1;
+  }
 
   return jpegblur(infile, outfile, bounding_boxes);
 }

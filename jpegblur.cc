@@ -67,6 +67,23 @@
 //     settings are not readable and may be tricky to reproduce.
 //     Recommend to test this first and adjust source as required.
 //
+// VALIDATION
+//
+//    The expectation is that a file exactly the same as the input is
+//    generated, if there is no region to blur.  There is no special
+//    code path in that case so we can use it to validate on our whole
+//    dataset.  Suppose we have a dataset in the directory `oxford`:
+//
+//        mkdir oxford-test
+//        for FPATH in $(find oxford/ -type f -name '*jpg'); do
+//            OUTFILE=$(echo $FPATH | sed 's,^oxford/,oxford-test/,')
+//            jpegblur < $FPATH > $OUTFILE
+//        done
+//        find oxford/ -type f -name '*jpg' \
+//          | xargs md5sum | sed 's, oxford/, oxford-test/,' \
+//          > oxford.md5sums
+//        md5sum --quiet --check oxford.md5sums
+//
 // EXAMPLES
 //
 //     Blur the top left 10x10 pixels (will be expanded to blur the
@@ -144,6 +161,12 @@ class JPEGDecompressor {
 private:
   struct jpeg_error_mgr jerr;
 
+  // FIXME: We can't call start_decompress if we only access the
+  // coefficients, and we can't call finish_decompression (in the
+  // destructor) if we didn't call start_decompression.  We should
+  // organize things better.
+  bool started_decompress = false;
+
   // Setup decompression object to save all markers in memory.
   void
   save_markers()
@@ -168,7 +191,6 @@ public:
     // We use buffered-image mode because we want to keep the
     // full-image coefficient array in memory.  If not, coefficients
     // are discarded as we scan each line of the image.
-    info.buffered_image = TRUE;
 
   }
 
@@ -217,6 +239,7 @@ public:
     // just specify scan=1 and assume we are dealing with the full
     // resolution image/scan.
     jpeg_start_decompress(&info);
+    started_decompress = true;
     jpeg_start_output(&info, 1);
 
     const int row_stride = rgb.size[1] * rgb.size[2];
@@ -238,7 +261,8 @@ public:
 
   ~JPEGDecompressor()
   {
-    jpeg_finish_decompress(&info);
+    if (started_decompress)
+      jpeg_finish_decompress(&info);
     jpeg_destroy_decompress(&info);
   }
 };
@@ -373,12 +397,14 @@ blur_image(const cv::Mat& src, const std::vector<BoundingBox>& bounding_boxes)
   if (length % 2 == 0)  // OpenCV requires kernel length to be odd
     ++length;
 
-  // Gaussian blur only handles 2D arrays so merge the channels.
   cv::Mat dst = src.clone();
-  cv::GaussianBlur(src.reshape(3, 2, src.size.p),
-                   dst.reshape(3, 2, src.size.p),
-                   cv::Size(length, length), sigma, sigma,
-                   cv::BorderTypes::BORDER_REPLICATE);
+
+  if (length != 0)  // Probably there are not bounding boxes.
+    // Gaussian blur only handles 2D arrays so merge the channels.
+    cv::GaussianBlur(src.reshape(3, 2, src.size.p),
+                     dst.reshape(3, 2, src.size.p),
+                     cv::Size(length, length), sigma, sigma,
+                     cv::BorderTypes::BORDER_REPLICATE);
   return dst;
 }
 
@@ -522,6 +548,7 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
     xl_bounding_boxes.push_back(bb.expanded_to_MCU());
 
   JPEGDecompressor src {srcfile};
+  src.info.buffered_image = TRUE;
 
   if (src.maybe_has_jfif_thumbnail()) {
     std::cerr << "This image might have a thumbnail.\n";
@@ -533,16 +560,14 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
 
   JPEGCompressor dst {dstfile};
 
-  if (xl_bounding_boxes.size()) {
-    const cv::Mat blurred_img = blur_image(src.to_image(), xl_bounding_boxes);
-    // FIXME: this should be just a JPEGDecompressor, no need to
-    // specialized class, go make it virtual.
-    JPEGFileDecompressor blurred = JPEGFileDecompressor::from_image(blurred_img,
-                                                                    src);
+  const cv::Mat blurred_img = blur_image(src.to_image(), xl_bounding_boxes);
+  // FIXME: this should be just a JPEGDecompressor, no need to
+  // specialized class, go make it virtual.
+  JPEGFileDecompressor blurred = JPEGFileDecompressor::from_image(blurred_img,
+                                                                  src);
 
-    for (auto bb : xl_bounding_boxes)
-      copy_region_from(src, blurred, bb);
-  }
+  for (auto bb : xl_bounding_boxes)
+    copy_region_from(src, blurred, bb);
 
   // XXX: the order of operations is quite sensitive to ensure that we
   // get an output file as similar as possible as the input.  To test

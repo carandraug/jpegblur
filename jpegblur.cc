@@ -154,6 +154,19 @@ public:
     const int x_height = (height + yi - x_yi + (8 -1)) /8 *8;
     return BoundingBox{x_xi, x_yi, x_width, x_height};
   }
+
+  cv::Mat
+  to_mask_for(const cv::Mat& img) const
+  {
+    cv::Mat mask = cv::Mat::zeros(img.dims, img.size.p, img.type());
+    // FIXME: there's assumption here that the bounding box does not
+    // go over the image size.
+    std::vector<cv::Range> ranges{cv::Range{yi, yi + height},
+                                  cv::Range{xi, xi + width}};
+    // FIXME: there's assumption here that the image is 8bit.
+    mask(ranges) = cv::Scalar{255,255,255};
+    return mask;
+  }
 };
 
 
@@ -382,30 +395,119 @@ public:
 };
 
 
-// Blur image with a kernel appropriate for the largest bounding box.
+
+// Create composite image by blending images using a transparency mask.
 cv::Mat
-blur_image(const cv::Mat& src, const std::vector<BoundingBox>& bounding_boxes)
+composite_image(const cv::Mat& img1, const cv::Mat& img2, const cv::Mat& mask)
 {
-  std::vector<int> lengths;
-  std::vector<double> sigmas;
-  int length = 0;
-  double sigma = 0.0;
-  for (auto bb : bounding_boxes) {
-    length = std::max<int>({length, bb.width /2, bb.height /2});
-    sigma = std::max<double>({sigma, bb.width /10., bb.height /10.});
-  }
+  // Mblurred * Iblurred + (1 - Mblurred) * I
+  //    <==>
+  // img2 * mask + (1 - mask) * img1
+  //
+  // TODO: there's gotta be a cleaner way to do this.  Check
+  // https://stackoverflow.com/questions/36216702/combining-2-images-with-transparent-mask-in-opencv#
+  cv::Mat mask_weights = mask.clone();
+  mask.convertTo(mask_weights, CV_64FC3, 1/255.0);
+
+  cv::Mat weighted_img2 = img2.clone();
+  cv::multiply(mask_weights, img2, weighted_img2,
+               1.0, img2.type());
+
+  cv::Mat mask_weights_complement = cv::Scalar::all(1.0) - mask_weights;
+
+  cv::Mat weighted_img1 = img1.clone();
+  cv::multiply(mask_weights_complement, img1, weighted_img1,
+               1.0, img1.type());
+
+  cv::Mat dst = img1.clone();
+  cv::add(weighted_img2, weighted_img1, dst);
+
+  return dst;
+}
+
+
+cv::Mat
+blur_region(const cv::Mat& src, const BoundingBox& bb)
+{
+  const double sigma = std::max(bb.width /20.0, bb.height /20.0);
+
+  // Gaussian kernel truncated at 10 sigma.  That's the value used for
+  // groundtruth in
+  // https://www.mia.uni-saarland.de/Publications/gwosdek-ssvm11.pdf
+  // Maybe we could use their extended box approach, same that is done
+  // in Pillow, since our images are relatively large and some of our
+  // regions (and therefore sigmas) are too.
+  int length = sigma * 10;
   if (length % 2 == 0)  // OpenCV requires kernel length to be odd
     ++length;
 
-  cv::Mat dst = src.clone();
+  // Gaussian blur only handles 2D arrays so merge the channels.
+  cv::Mat img = src.reshape(3, 2, src.size.p);
 
-  if (length != 0)  // Probably there are not bounding boxes.
-    // Gaussian blur only handles 2D arrays so merge the channels.
-    cv::GaussianBlur(src.reshape(3, 2, src.size.p),
-                     dst.reshape(3, 2, src.size.p),
-                     cv::Size(length, length), sigma, sigma,
-                     cv::BorderTypes::BORDER_REPLICATE);
-  return dst;
+  cv::Mat img_blurred = img.clone();
+  cv::GaussianBlur(img, img_blurred, cv::Size(length, length), sigma, sigma,
+                   cv::BorderTypes::BORDER_REPLICATE);
+
+  cv::Mat mask = bb.to_mask_for(img);
+  cv::Mat mask_blurred = mask.clone();
+  cv::GaussianBlur(mask, mask_blurred, cv::Size(length, length), sigma, sigma,
+                   cv::BorderTypes::BORDER_REPLICATE);
+
+  return composite_image(img, img_blurred, mask_blurred);
+
+}
+
+
+// Same approach described in https://arxiv.org/abs/2103.06191 (see
+// Appendix B and Figure C).  Their implementation is at
+// https://github.com/princetonvisualai/imagenet-face-obfuscation/blob/main/experiments/blurring.py
+// and we follow it through Pillow's:
+//
+//   1. src/PIL/ImageFilter.py (GaussianBlur)
+//   2. src/_imaging.c (_gaussian_blur)
+//   3. src/libImaging/BoxBlur.c (ImagingGaussianBlur)
+cv::Mat
+blur_image(const cv::Mat& src, const std::vector<BoundingBox>& bounding_boxes)
+{
+  if (! bounding_boxes.size())
+    return src.clone();
+
+  std::vector<double> sigmas;
+  double sigma = 0.0;
+  for (auto bb : bounding_boxes)
+    sigma = std::max({sigma, bb.width /20., bb.height /20.});
+
+  // Gaussian kernel truncated at 10 sigma.  That's the value used for
+  // groundtruth in
+  // https://www.mia.uni-saarland.de/Publications/gwosdek-ssvm11.pdf
+  // Maybe we could use their extended box approach, same that is done
+  // in Pillow, since our images are relatively large and some of our
+  // regions (and therefore sigmas) are too.
+  int length = sigma * 10;
+  if (length % 2 == 0)  // OpenCV requires kernel length to be odd
+    ++length;
+
+  // Gaussian blur only handles 2D arrays so merge the channels.
+  cv::Mat img = src.reshape(3, 2, src.size.p);
+
+  cv::Mat mask = img.clone();
+  for (auto bb : bounding_boxes) {
+    std::vector<cv::Range> ranges{cv::Range{bb.yi, bb.yi + bb.height},
+                                  cv::Range{bb.xi, bb.xi + bb.width}};
+    // FIXME: there's assumption here that the image is 8bit.
+    mask(ranges) = cv::Scalar{255,255,255};
+  }
+
+  cv::Mat mask_blurred = mask.clone();
+  cv::GaussianBlur(mask, mask_blurred, cv::Size(length, length), sigma, sigma,
+                   cv::BorderTypes::BORDER_REPLICATE);
+
+  cv::Mat img_blurred = img.clone();
+  cv::GaussianBlur(img, img_blurred, cv::Size(length, length), sigma, sigma,
+                   cv::BorderTypes::BORDER_REPLICATE);
+
+  cv::Mat composite = composite_image(img, img_blurred, mask_blurred);
+  return composite.reshape(1, 3, src.size.p);
 }
 
 
@@ -413,13 +515,20 @@ void
 copy_region_from(JPEGDecompressor& dst, JPEGFileDecompressor& blurred,
                  const BoundingBox& bb)
 {
+  // FIXME: pass image size to this
+  BoundingBox xl_bb = bb.expanded_to_MCU();
+
   // We are doing the indexing in MCU coordinates and not in pixels
   // (one MCU corresponds to 8x8 pixels).
-  const int start_col = bb.xi / 8;
-  const int end_col = start_col + (bb.width /8);
+  const int start_col = xl_bb.xi / 8;
+  int end_col = start_col + (xl_bb.width /8);
+  if (end_col > dst.info.MCUs_per_row -1)
+    end_col = dst.info.MCUs_per_row -1;
 
-  const int start_row = bb.yi / 8;
-  const int end_row = start_row + (bb.height /8);
+  const int start_row = xl_bb.yi / 8;
+  int end_row = start_row + (xl_bb.height /8);
+  if (end_row > dst.info.MCU_rows_in_scan -1)
+    end_row = dst.info.MCU_rows_in_scan -1;
 
   for (int comp_i = 0; comp_i < dst.info.num_components; ++comp_i) {
     for (int row_i = start_row; row_i < end_row+1; ++row_i) {
@@ -540,13 +649,6 @@ int
 jpegblur(std::FILE *srcfile, std::FILE *dstfile,
          const std::vector<BoundingBox>& bounding_boxes)
 {
-  // The rest of the code expects bounding boxes to lie on MCU limits.
-  // We expand it here but they don't do any check.  We should have a
-  // separate type for such MCU expanded BB.
-  std::vector<BoundingBox> xl_bounding_boxes;
-  for (auto bb : bounding_boxes)
-    xl_bounding_boxes.push_back(bb.expanded_to_MCU());
-
   JPEGDecompressor src {srcfile};
   src.info.buffered_image = TRUE;
 
@@ -560,13 +662,13 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
 
   JPEGCompressor dst {dstfile};
 
-  const cv::Mat blurred_img = blur_image(src.to_image(), xl_bounding_boxes);
+  const cv::Mat blurred_img = blur_image(src.to_image(), bounding_boxes);
   // FIXME: this should be just a JPEGDecompressor, no need to
   // specialized class, go make it virtual.
   JPEGFileDecompressor blurred = JPEGFileDecompressor::from_image(blurred_img,
                                                                   src);
 
-  for (auto bb : xl_bounding_boxes)
+  for (auto bb : bounding_boxes)
     copy_region_from(src, blurred, bb);
 
   // XXX: the order of operations is quite sensitive to ensure that we

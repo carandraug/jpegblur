@@ -1,15 +1,18 @@
 jpegblur - "lossless" "blurring" of regions in JPEG image
 =========================================================
 
-jpegblur is a program "heavily based on" (read 80% copied from)
-jpegtran (jpegtran is a program distributed with libjpeg for lossless
-transformation of JPEG files) to blur regions of a JPEG image while
-minimising changes in the image file.
+jpegblur is a program to blur regions of a JPEG image while minimising
+changes in the image file.
 
 jpegblur takes bounding boxes from command line and returns a JPEG
 image with those regions blurred.  It does this in DCT space thus
-avoiding the introduction of new compression artefacts.  It also
-preserves all metadata by copying all extra markers.
+avoiding the introduction of new compression artefacts outside the
+blurred region.  The blurring approach is the same as the one
+described in [Yang et al, 2021](https://arxiv.org/abs/2103.06191).
+
+jpegblu also preserves all metadata by copying all extra markers,
+similar to jpegtran, a program distributed with libjpeg for lossless
+transformation of JPEG files.
 
 The purpose of this program is to redact Personally Identifiable
 Information (PII) while avoiding any other changes to the image file.

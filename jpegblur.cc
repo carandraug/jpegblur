@@ -115,58 +115,93 @@
 #include <jpeglib.h>
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/core/types.hpp>
+#include <opencv2/highgui.hpp>
 
 
 class BoundingBox {
 public:
-  const int xi;
-  const int yi;
-  const int width;
-  const int height;
+  const int x0;
+  const int y0;
+  const int x1;
+  const int y1;
 
-  BoundingBox(const int xi, const int yi, const int width, const int height)
-     : xi{xi}, yi{yi}, width{width}, height{height}
+  BoundingBox(const int x0, const int y0, const int x1, const int y1)
+     : x0{x0}, y0{y0}, x1{x1}, y1{y1}
   {}
+
+  int
+  width() const
+  {
+    return x1 - x0;
+  }
+
+  int
+  height() const
+  {
+    return y1 - y0;
+  }
+
+  void
+  print() const
+  {
+    std::cerr << "[" << x0<< ", " << y0 << ", " << x1 <<", " << y1 << "]\n";
+  }
 
   static BoundingBox
   from_cmdline_arg(const std::string& arg)
   {
-    int xi, yi, width, height;
+    int x0, y0, width, height;
     std::stringstream argss(arg);
     std::string sep("   ");
-    if (! (argss >> xi >> sep[0]
-           >> yi >> sep[1]
+    if (! (argss >> x0 >> sep[0]
+           >> y0 >> sep[1]
            >> width >> sep[2]
            >> height)
         || sep != ",,,"
         || ! argss.eof())
       throw std::invalid_argument("failed to parse BB from '" + arg + "'");
-  return BoundingBox{xi, yi, width, height};
+    return BoundingBox{x0, y0, x0 + width, y0 + height};
   }
 
   // New BB expanded to include all MCUs under the original BB.
   BoundingBox
   expanded_to_MCU() const
   {
-    const int x_xi = xi /8 *8;
-    const int x_yi = yi /8 *8;
-    const int x_width = (width + xi - x_xi + (8 -1)) /8 *8;
-    const int x_height = (height + yi - x_yi + (8 -1)) /8 *8;
-    return BoundingBox{x_xi, x_yi, x_width, x_height};
+    const int x_x0 = x0 /8 *8;
+    const int x_y0 = y0 /8 *8;
+    const int x_x1 = (x1 + (8 -1)) /8 *8;
+    const int x_y1 = (y1 + (8 -1)) /8 *8;
+    return BoundingBox{x_x0, x_y0, x_x1, x_y1};
+  }
+
+  // New BB expanded by l on all directions.
+  BoundingBox
+  expand_by(const int l) const
+  {
+    return BoundingBox{x0 -l, y0 -l, x1 +l, y1 +l};
+  }
+
+  BoundingBox
+  limit_for_size(const int ncols, const int nrows) const
+  {
+    return BoundingBox{
+      (x0 < 0) ? 0 : x0,
+      (y0 < 0) ? 0 : y0,
+      (x1 < ncols) ? x1 : ncols -1,
+      (y1 < nrows) ? y1 : nrows -1,
+    };
   }
 
   cv::Mat
   to_mask_for(const cv::Mat& img) const
   {
-    cv::Mat mask = cv::Mat::zeros(img.dims, img.size.p, img.type());
-    // FIXME: there's assumption here that the bounding box does not
-    // go over the image size.
-    std::vector<cv::Range> ranges{cv::Range{yi, yi + height},
-                                  cv::Range{xi, xi + width}};
-    // FIXME: there's assumption here that the image is 8bit.
-    mask(ranges) = cv::Scalar{255,255,255};
+    // FIXME: assumption that this is a RGB image
+    cv::Mat mask = cv::Mat::zeros(img.dims, img.size.p, CV_64FC3);
+    mask(cv::Range{y0, y1+1}, cv::Range{x0, x1+1}) = cv::Scalar{1.0,1.0,1.0};
     return mask;
   }
+
 };
 
 
@@ -405,18 +440,15 @@ composite_image(const cv::Mat& img1, const cv::Mat& img2, const cv::Mat& mask)
   // img2 * mask + (1 - mask) * img1
   //
   // TODO: there's gotta be a cleaner way to do this.  Check
-  // https://stackoverflow.com/questions/36216702/combining-2-images-with-transparent-mask-in-opencv#
-  cv::Mat mask_weights = mask.clone();
-  mask.convertTo(mask_weights, CV_64FC3, 1/255.0);
-
+  // https://stackoverflow.com/questions/36216702/combining-2-images-with-transparent-mask-in-opencv
   cv::Mat weighted_img2 = img2.clone();
-  cv::multiply(mask_weights, img2, weighted_img2,
+  cv::multiply(mask, img2, weighted_img2,
                1.0, img2.type());
 
-  cv::Mat mask_weights_complement = cv::Scalar::all(1.0) - mask_weights;
+  cv::Mat mask_complement = cv::Scalar::all(1.0) - mask;
 
   cv::Mat weighted_img1 = img1.clone();
-  cv::multiply(mask_weights_complement, img1, weighted_img1,
+  cv::multiply(mask_complement, img1, weighted_img1,
                1.0, img1.type());
 
   cv::Mat dst = img1.clone();
@@ -427,9 +459,9 @@ composite_image(const cv::Mat& img1, const cv::Mat& img2, const cv::Mat& mask)
 
 
 cv::Mat
-blur_region(const cv::Mat& src, const BoundingBox& bb)
+blur_region(const cv::Mat& img, const BoundingBox& bb)
 {
-  const double sigma = std::max(bb.width /20.0, bb.height /20.0);
+  const double sigma = 0.1 * std::max(bb.width(), bb.height());
 
   // Gaussian kernel truncated at 10 sigma.  That's the value used for
   // groundtruth in
@@ -441,24 +473,24 @@ blur_region(const cv::Mat& src, const BoundingBox& bb)
   if (length % 2 == 0)  // OpenCV requires kernel length to be odd
     ++length;
 
-  // Gaussian blur only handles 2D arrays so merge the channels.
-  cv::Mat img = src.reshape(3, 2, src.size.p);
-
   cv::Mat img_blurred = img.clone();
   cv::GaussianBlur(img, img_blurred, cv::Size(length, length), sigma, sigma,
                    cv::BorderTypes::BORDER_REPLICATE);
 
-  cv::Mat mask = bb.to_mask_for(img);
+  const int xt = std::max(bb.width() /10, bb.height() /10);
+  const BoundingBox xl_bb = bb.expand_by(xt).limit_for_size(img.cols, img.rows);
+
+  cv::Mat mask = xl_bb.to_mask_for(img);
   cv::Mat mask_blurred = mask.clone();
   cv::GaussianBlur(mask, mask_blurred, cv::Size(length, length), sigma, sigma,
                    cv::BorderTypes::BORDER_REPLICATE);
-
+  cv::Mat f = mask_blurred.clone();
+  mask_blurred.convertTo(f, CV_8UC3, 255.);
   return composite_image(img, img_blurred, mask_blurred);
-
 }
 
 
-// Same approach described in https://arxiv.org/abs/2103.06191 (see
+// Similar approach described in https://arxiv.org/abs/2103.06191 (see
 // Appendix B and Figure C).  Their implementation is at
 // https://github.com/princetonvisualai/imagenet-face-obfuscation/blob/main/experiments/blurring.py
 // and we follow it through Pillow's:
@@ -466,48 +498,28 @@ blur_region(const cv::Mat& src, const BoundingBox& bb)
 //   1. src/PIL/ImageFilter.py (GaussianBlur)
 //   2. src/_imaging.c (_gaussian_blur)
 //   3. src/libImaging/BoxBlur.c (ImagingGaussianBlur)
+//
+// There's two main changes:
+//
+//   1. we blur one region at a time instead of only once.  We do that
+//      to cover the case where we have in the same image a very small
+//      region and a very large region.  If we don't, then we would
+//      blur with a very high sigma a very small region.
+//   2. they use a gaussian blur approximation which is much faster
+//      and seems to blur a lot more.
 cv::Mat
 blur_image(const cv::Mat& src, const std::vector<BoundingBox>& bounding_boxes)
 {
   if (! bounding_boxes.size())
     return src.clone();
 
-  std::vector<double> sigmas;
-  double sigma = 0.0;
-  for (auto bb : bounding_boxes)
-    sigma = std::max({sigma, bb.width /20., bb.height /20.});
-
-  // Gaussian kernel truncated at 10 sigma.  That's the value used for
-  // groundtruth in
-  // https://www.mia.uni-saarland.de/Publications/gwosdek-ssvm11.pdf
-  // Maybe we could use their extended box approach, same that is done
-  // in Pillow, since our images are relatively large and some of our
-  // regions (and therefore sigmas) are too.
-  int length = sigma * 10;
-  if (length % 2 == 0)  // OpenCV requires kernel length to be odd
-    ++length;
-
-  // Gaussian blur only handles 2D arrays so merge the channels.
+  // Gaussian blur only handles 2D arrays so merge the channels and
+  // split them at the end.
   cv::Mat img = src.reshape(3, 2, src.size.p);
+  for (auto bb : bounding_boxes)
+    img = blur_region(img, bb);
 
-  cv::Mat mask = img.clone();
-  for (auto bb : bounding_boxes) {
-    std::vector<cv::Range> ranges{cv::Range{bb.yi, bb.yi + bb.height},
-                                  cv::Range{bb.xi, bb.xi + bb.width}};
-    // FIXME: there's assumption here that the image is 8bit.
-    mask(ranges) = cv::Scalar{255,255,255};
-  }
-
-  cv::Mat mask_blurred = mask.clone();
-  cv::GaussianBlur(mask, mask_blurred, cv::Size(length, length), sigma, sigma,
-                   cv::BorderTypes::BORDER_REPLICATE);
-
-  cv::Mat img_blurred = img.clone();
-  cv::GaussianBlur(img, img_blurred, cv::Size(length, length), sigma, sigma,
-                   cv::BorderTypes::BORDER_REPLICATE);
-
-  cv::Mat composite = composite_image(img, img_blurred, mask_blurred);
-  return composite.reshape(1, 3, src.size.p);
+  return img.reshape(1, 3, src.size.p);
 }
 
 
@@ -520,13 +532,13 @@ copy_region_from(JPEGDecompressor& dst, JPEGFileDecompressor& blurred,
 
   // We are doing the indexing in MCU coordinates and not in pixels
   // (one MCU corresponds to 8x8 pixels).
-  const int start_col = xl_bb.xi / 8;
-  int end_col = start_col + (xl_bb.width /8);
+  const int start_col = xl_bb.x0 / 8;
+  int end_col = xl_bb.x1 / 8;
   if (end_col > dst.info.MCUs_per_row -1)
     end_col = dst.info.MCUs_per_row -1;
 
-  const int start_row = xl_bb.yi / 8;
-  int end_row = start_row + (xl_bb.height /8);
+  const int start_row = xl_bb.y0 / 8;
+  int end_row = xl_bb.y1 / 8;
   if (end_row > dst.info.MCU_rows_in_scan -1)
     end_row = dst.info.MCU_rows_in_scan -1;
 
@@ -538,6 +550,89 @@ copy_region_from(JPEGDecompressor& dst, JPEGFileDecompressor& blurred,
       for (int col_i = start_col; col_i < end_col +1; ++col_i)
         for (int i = 0; i < DCTSIZE2; ++i)
           dst_buf[0][col_i][i] = src_buf[0][col_i][i];
+    }
+  }
+}
+
+
+void
+print_size(const std::string& name, const cv::Mat& m)
+{
+  if (m.dims > 2)
+    std::cerr << name << " size is :" << m.size[0] << "x" << m.size[1] << "x" << m.size[2] << "\n";
+  else
+    std::cerr << name << " size is :" << m.rows << "x" << m.cols << "\n";
+}
+
+
+// This is equivalent to cv::reduce(src, dst, 2, REDUCE_MAX) if
+// cv::reduce could reduce across the 3rd dimension.
+cv::Mat
+reduceMax3D(const cv::Mat& src)
+{
+  // Don't catch dims<3 because in that case we do nothing anyway.
+  if (src.dims > 3)
+    throw std::invalid_argument {"SRC has more than 3 dimensions"};
+
+  const std::vector<int> tmpshape {src.size[0] * src.size[1], src.size[2]};
+  cv::Mat dst = src.reshape(1, 2, tmpshape.data());
+  cv::reduce(dst, dst, 1, cv::ReduceTypes::REDUCE_MAX);
+  dst = dst.reshape(1, src.size[0]);
+
+  assert (dst.size[0] == src.size[0] && dst.size[1] == src.size[1]);
+  return dst;
+}
+
+
+cv::Mat
+reduceMaxMCU(const cv::Mat& src)
+{
+  if (src.dims > 2)
+    throw std::invalid_argument {"SRC has more than 2 dimensions"};
+
+  int MCUrows = (src.rows + 7) / 8;
+  int MCUcols = (src.cols + 7) / 8;
+
+  cv::Mat dst;
+  cv::copyMakeBorder(src, dst,
+                     0, (MCUrows * 8) - src.rows,
+                     0, (MCUcols * 8) - src.cols,
+                     cv::BorderTypes::BORDER_CONSTANT,
+                     cv::Scalar(false));
+
+  dst = dst.reshape(1, MCUcols * MCUrows * 8);
+  cv::reduce(dst, dst, 1, cv::ReduceTypes::REDUCE_MAX);
+  dst = dst.reshape(1, MCUrows * 8);
+
+  cv::transpose(dst, dst);
+  dst = dst.reshape(1, MCUrows * MCUcols);
+  cv::reduce(dst, dst, 1, cv::ReduceTypes::REDUCE_MAX);
+  dst = dst.reshape(1, MCUcols);
+  cv::transpose(dst, dst);
+
+  assert (dst.cols == MCUcols && dst.rows == MCUrows);
+  return dst;
+}
+
+
+void
+merge(JPEGDecompressor& src, const cv::Mat& src_img,
+      JPEGDecompressor& mod, const cv::Mat& mod_img)
+{
+  cv::Mat MCUmask = reduceMaxMCU(reduceMax3D(src_img != mod_img));
+  assert (MCUmask.rows == src.info.MCU_rows_in_scan
+          && MCUmask.cols == src.info.MCUs_per_row);
+
+  for (int comp_idx = 0; comp_idx < src.info.num_components; ++comp_idx) {
+    for (int row_idx = 0; row_idx < MCUmask.rows ; ++row_idx) {
+      bool* MCUptr = MCUmask.ptr<bool>(row_idx);
+      JBLOCKARRAY src_buf = src.get_coeff_for_row(comp_idx, row_idx);
+      JBLOCKARRAY mod_buf = mod.get_coeff_for_row(comp_idx, row_idx);
+      for (int col_idx = 0; col_idx < MCUmask.cols; ++col_idx) {
+        if (MCUptr[col_idx])
+          for (int i = 0; i < DCTSIZE2; ++i)
+            src_buf[0][col_idx][i] = mod_buf[0][col_idx][i];
+      }
     }
   }
 }
@@ -556,12 +651,12 @@ pixelate_regions(const JPEGDecompressor& src,
 
   // We are doing the indexing in MCU coordinates and not in pixels
   // (one MCU corresponds to 8x8 pixels).
-  const int start_col = mcu_bb.xi / 8;
-  const int end_col = start_col + (mcu_bb.width /8);
+  const int start_col = mcu_bb.x0 / 8;
+  const int end_col = mcu_bb.x1 /8;
   const int ncols = end_col - start_col;
 
-  const int start_row = mcu_bb.yi / 8;
-  const int end_row = start_row + (mcu_bb.height /8);
+  const int start_row = mcu_bb.y0 / 8;
+  const int end_row = mcu_bb.y1 / 8;
   const int nrows = end_row - start_row;
 
   // In addition of "destroying" each MCU information to only use the
@@ -662,14 +757,16 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
 
   JPEGCompressor dst {dstfile};
 
-  const cv::Mat blurred_img = blur_image(src.to_image(), bounding_boxes);
+  const cv::Mat img = src.to_image();
+  const cv::Mat blurred_img = blur_image(img, bounding_boxes);
+
   // FIXME: this should be just a JPEGDecompressor, no need to
   // specialized class, go make it virtual.
   JPEGFileDecompressor blurred = JPEGFileDecompressor::from_image(blurred_img,
                                                                   src);
 
-  for (auto bb : bounding_boxes)
-    copy_region_from(src, blurred, bb);
+  // TODO: maybe have src and blurred save the image
+  merge(src, img, blurred, blurred_img);
 
   // XXX: the order of operations is quite sensitive to ensure that we
   // get an output file as similar as possible as the input.  To test
@@ -706,7 +803,7 @@ main(int argc, char *argv[])
   std::FILE *infile = stdin;
   std::FILE *outfile = stdout;
 
-  std::vector<BoundingBox> bounding_boxes;
+ std::vector<BoundingBox> bounding_boxes;
   bool do_pixelation = false;
 
   for (int i = 1; i < argc; ++i) {

@@ -36,7 +36,7 @@
 //
 // SYNOPSIS
 //
-//     jpegblur [BOUNDING-BOX ...] < IN_JPEG > OUT_JPEG
+//     jpegblur [--no-optimise] [BOUNDING-BOX ...] < IN_JPEG > OUT_JPEG
 //
 // DESCRIPTION
 //
@@ -65,7 +65,13 @@
 //     Ideally, calling `jpegblur` without any region should output a
 //     file that is exactly the same byte by byte.  However, encoding
 //     settings are not readable and may be tricky to reproduce.
-//     Recommend to test this first and adjust source as required.
+//     Recommend to test this first and adjust source as required and
+//     try with the `--no-optimise` option.
+//
+// OPTIONS
+//
+//    --no-optimise
+//        Do not perform optimization of entropy encoding parameters.
 //
 // VALIDATION
 //
@@ -415,7 +421,6 @@ public:
       JPEGCompressor dst {outfp};
       dst.copy_critical_parameters_from(src);
       dst.info.in_color_space = src.info.out_color_space;
-      dst.info.optimize_coding = TRUE;
       jpeg_start_compress(&dst.info, TRUE);
 
       JSAMPROW row_pointer[1];
@@ -701,7 +706,8 @@ pixelate_regions(const JPEGDecompressor& src,
 
 int
 jpegblur(std::FILE *srcfile, std::FILE *dstfile,
-         const std::vector<BoundingBox>& bounding_boxes)
+         const std::vector<BoundingBox>& bounding_boxes,
+         bool do_optimisation)
 {
   JPEGDecompressor src {srcfile};
   src.info.buffered_image = TRUE;
@@ -741,10 +747,7 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
   //   * save_markers must happen before jpeg_read_header
   dst.copy_critical_parameters_from(src);
 
-  // We don't know if coding was optimised on the input file.  Ideally
-  // we would use exactly the same options but failing that, let us
-  // optimise for disk space.
-  dst.info.optimize_coding = TRUE;
+  dst.info.optimize_coding = do_optimisation;
 
   dst.info.arith_code = src.info.arith_code;
 
@@ -761,13 +764,21 @@ main(int argc, char *argv[])
   std::FILE *infile = stdin;
   std::FILE *outfile = stdout;
 
- std::vector<BoundingBox> bounding_boxes;
+  std::vector<BoundingBox> bounding_boxes;
   bool do_pixelation = false;
+
+  // We don't know if the input file used an optimised coding table so
+  // we need this as an command line option (this is the same that
+  // jpegtran does).  The user needs to try both options and without
+  // any bounding box and find which one would return the same file.
+  bool do_optimisation = true;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg {argv[i]};
-    if (i == 1 && arg == "--pixelate")
+    if ((i == 1 || i == 2) && arg == "--pixelate")
       do_pixelation = true;
+    if ((i == 1 || i == 2) && arg == "--no-optimise")
+      do_optimisation = false;
     else
       bounding_boxes.push_back(BoundingBox::from_cmdline_arg(arg));
   }
@@ -777,5 +788,5 @@ main(int argc, char *argv[])
     return 1;
   }
 
-  return jpegblur(infile, outfile, bounding_boxes);
+  return jpegblur(infile, outfile, bounding_boxes, do_optimisation);
 }

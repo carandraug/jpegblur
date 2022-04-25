@@ -119,6 +119,14 @@
 #include <opencv2/highgui.hpp>
 
 
+// We could adjust the size of individual Mat elements when reading
+// the pixel values but I'm not sure what we would need to do in terms
+// of scaling them.  Also, this does not matter when doing pixelation
+// only.
+static_assert(sizeof(JSAMPLE) == 1,
+              "libjpeg not built with BITS_IN_JSAMPLE == 8");
+
+
 class BoundingBox {
 public:
   const int x0;
@@ -196,9 +204,10 @@ public:
   cv::Mat
   to_mask_for(const cv::Mat& img) const
   {
-    // FIXME: assumption that this is a RGB image
-    cv::Mat mask = cv::Mat::zeros(img.dims, img.size.p, CV_64FC3);
-    mask(cv::Range{y0, y1+1}, cv::Range{x0, x1+1}) = cv::Scalar{1.0,1.0,1.0};
+    const std::vector<int> tmp_shape {img.rows, img.cols, img.channels()};
+    cv::Mat mask = cv::Mat::zeros(3, tmp_shape.data(), CV_64F);
+    mask = mask.reshape(img.channels(), 2, tmp_shape.data());
+    mask(cv::Range{y0, y1+1}, cv::Range{x0, x1+1}) = cv::Scalar::all(1.0);
     return mask;
   }
 
@@ -239,7 +248,6 @@ public:
     // We use buffered-image mode because we want to keep the
     // full-image coefficient array in memory.  If not, coefficients
     // are discarded as we scan each line of the image.
-
   }
 
   bool
@@ -272,16 +280,6 @@ public:
   cv::Mat
   to_image()
   {
-    const std::vector<int> sz{info.image_height,
-                              info.image_width,
-                              info.num_components};
-
-    cv::Mat rgb;
-    if (sizeof(JSAMPLE) == 1)
-      rgb = cv::Mat(sz, CV_8UC1);
-    else  // libjpeg built with BITS_IN_JSAMPLE == 12
-      rgb = cv::Mat(sz, CV_16UC1);
-
     // We are not dealing with progressive images and only use
     // buffered-image to keep all coefficients in memory.  So we can
     // just specify scan=1 and assume we are dealing with the full
@@ -290,21 +288,30 @@ public:
     started_decompress = true;
     jpeg_start_output(&info, 1);
 
-    const int row_stride = rgb.size[1] * rgb.size[2];
-    JSAMPARRAY buffer = info.mem->alloc_sarray((j_common_ptr)&info,
-                                               JPOOL_IMAGE, row_stride, 1);
+    // Should be possible to read the image straight into a 3 channel
+    // 2D matrix but I couldn't figure out the right incantations so
+    // it's created as 1 channel 3D array and reshaped at the end.
+    cv::Mat rgb {{static_cast<int>(info.image_height),
+                  static_cast<int>(info.image_width),
+                  static_cast<int>(info.num_components)},
+                 CV_8UC1};
 
-    int line_i = 0;
+    const int row_stride = info.image_width * info.num_components;
+    JSAMPARRAY row_buffer = info.mem->alloc_sarray((j_common_ptr)&info,
+                                                   JPOOL_IMAGE, row_stride, 1);
+
+    int line_idx = 0;
     while (info.output_scanline < info.output_height) {
-      jpeg_read_scanlines(&info, buffer, 1);
+      jpeg_read_scanlines(&info, row_buffer, 1);
       for (int i = 0; i < row_stride; i++)
-        rgb.data[line_i*row_stride + i] = buffer[0][i];
+        rgb.data[line_idx*row_stride + i] = row_buffer[0][i];
 
-      ++line_i;
+      ++line_idx;
     }
 
     jpeg_finish_output(&info);
-    return rgb;
+
+    return rgb.reshape(info.num_components, 2, rgb.size.p);
   }
 
   ~JPEGDecompressor()
@@ -388,7 +395,7 @@ public:
 // FIXME: this should be done some other way.
 class JPEGFileDecompressor : public JPEGDecompressor {
 private:
-  const std::string fpath;
+  std::string fpath;
 
 public:
   JPEGFileDecompressor(const std::string& fpath)
@@ -407,12 +414,12 @@ public:
     {
       JPEGCompressor dst {outfp};
       dst.copy_critical_parameters_from(src);
-      dst.info.in_color_space = JCS_RGB;
+      dst.info.in_color_space = src.info.out_color_space;
       dst.info.optimize_coding = TRUE;
       jpeg_start_compress(&dst.info, TRUE);
 
       JSAMPROW row_pointer[1];
-      const int row_stride = img.size[1] * img.size[2];
+      const int row_stride = img.cols * img.channels();
       while (dst.info.next_scanline < dst.info.image_height) {
         row_pointer[0] = &img.data[dst.info.next_scanline * row_stride];
         jpeg_write_scanlines(&dst.info, row_pointer, 1);
@@ -441,20 +448,18 @@ composite_image(const cv::Mat& img1, const cv::Mat& img2, const cv::Mat& mask)
   //
   // TODO: there's gotta be a cleaner way to do this.  Check
   // https://stackoverflow.com/questions/36216702/combining-2-images-with-transparent-mask-in-opencv
-  cv::Mat weighted_img2 = img2.clone();
+  cv::Mat weighted_img2;
   cv::multiply(mask, img2, weighted_img2,
                1.0, img2.type());
 
-  cv::Mat mask_complement = cv::Scalar::all(1.0) - mask;
-
-  cv::Mat weighted_img1 = img1.clone();
-  cv::multiply(mask_complement, img1, weighted_img1,
+  cv::Mat weighted_img1;
+  cv::multiply(cv::Scalar::all(1.0) - mask, img1, weighted_img1,
                1.0, img1.type());
 
-  cv::Mat dst = img1.clone();
-  cv::add(weighted_img2, weighted_img1, dst);
+  cv::Mat composite;
+  cv::add(weighted_img2, weighted_img1, composite);
 
-  return dst;
+  return composite;
 }
 
 
@@ -473,7 +478,7 @@ blur_region(const cv::Mat& img, const BoundingBox& bb)
   if (length % 2 == 0)  // OpenCV requires kernel length to be odd
     ++length;
 
-  cv::Mat img_blurred = img.clone();
+  cv::Mat img_blurred;
   cv::GaussianBlur(img, img_blurred, cv::Size(length, length), sigma, sigma,
                    cv::BorderTypes::BORDER_REPLICATE);
 
@@ -481,11 +486,10 @@ blur_region(const cv::Mat& img, const BoundingBox& bb)
   const BoundingBox xl_bb = bb.expand_by(xt).limit_for_size(img.cols, img.rows);
 
   cv::Mat mask = xl_bb.to_mask_for(img);
-  cv::Mat mask_blurred = mask.clone();
+  cv::Mat mask_blurred;
   cv::GaussianBlur(mask, mask_blurred, cv::Size(length, length), sigma, sigma,
                    cv::BorderTypes::BORDER_REPLICATE);
-  cv::Mat f = mask_blurred.clone();
-  mask_blurred.convertTo(f, CV_8UC3, 255.);
+
   return composite_image(img, img_blurred, mask_blurred);
 }
 
@@ -510,58 +514,13 @@ blur_region(const cv::Mat& img, const BoundingBox& bb)
 cv::Mat
 blur_image(const cv::Mat& src, const std::vector<BoundingBox>& bounding_boxes)
 {
-  if (! bounding_boxes.size())
-    return src.clone();
-
   // Gaussian blur only handles 2D arrays so merge the channels and
   // split them at the end.
-  cv::Mat img = src.reshape(3, 2, src.size.p);
+  cv::Mat img = src.clone();
   for (auto bb : bounding_boxes)
     img = blur_region(img, bb);
 
-  return img.reshape(1, 3, src.size.p);
-}
-
-
-void
-copy_region_from(JPEGDecompressor& dst, JPEGFileDecompressor& blurred,
-                 const BoundingBox& bb)
-{
-  // FIXME: pass image size to this
-  BoundingBox xl_bb = bb.expanded_to_MCU();
-
-  // We are doing the indexing in MCU coordinates and not in pixels
-  // (one MCU corresponds to 8x8 pixels).
-  const int start_col = xl_bb.x0 / 8;
-  int end_col = xl_bb.x1 / 8;
-  if (end_col > dst.info.MCUs_per_row -1)
-    end_col = dst.info.MCUs_per_row -1;
-
-  const int start_row = xl_bb.y0 / 8;
-  int end_row = xl_bb.y1 / 8;
-  if (end_row > dst.info.MCU_rows_in_scan -1)
-    end_row = dst.info.MCU_rows_in_scan -1;
-
-  for (int comp_i = 0; comp_i < dst.info.num_components; ++comp_i) {
-    for (int row_i = start_row; row_i < end_row+1; ++row_i) {
-      JBLOCKARRAY dst_buf = dst.get_coeff_for_row(comp_i, row_i);
-      JBLOCKARRAY src_buf = blurred.get_coeff_for_row(comp_i, row_i);
-
-      for (int col_i = start_col; col_i < end_col +1; ++col_i)
-        for (int i = 0; i < DCTSIZE2; ++i)
-          dst_buf[0][col_i][i] = src_buf[0][col_i][i];
-    }
-  }
-}
-
-
-void
-print_size(const std::string& name, const cv::Mat& m)
-{
-  if (m.dims > 2)
-    std::cerr << name << " size is :" << m.size[0] << "x" << m.size[1] << "x" << m.size[2] << "\n";
-  else
-    std::cerr << name << " size is :" << m.rows << "x" << m.cols << "\n";
+  return img;
 }
 
 
@@ -759,7 +718,6 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
 
   const cv::Mat img = src.to_image();
   const cv::Mat blurred_img = blur_image(img, bounding_boxes);
-
   // FIXME: this should be just a JPEGDecompressor, no need to
   // specialized class, go make it virtual.
   JPEGFileDecompressor blurred = JPEGFileDecompressor::from_image(blurred_img,

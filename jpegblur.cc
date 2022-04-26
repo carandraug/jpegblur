@@ -108,14 +108,22 @@
 //
 //         jpegblur < foo.jpg > bar.jpg
 //         md5sum foo.jpg bar.jpg
+//
+// CAVEATS
+//
+//     The region coordinates should be related to the raw image.  If
+//     the image is in Exif file with orientation metadata, it is
+//     ignored.
 
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <jpeglib.h>
@@ -275,12 +283,14 @@ public:
   get_coeff_for_row(const int component_idx, const int row_idx)
   {
     jvirt_barray_ptr *coeff_arrays = jpeg_read_coefficients(&info);
+    jpeg_component_info comp_info = info.comp_info[component_idx];
     // Should be possible to specify the number of rows in
     // access_virt_barray but I keep getting "Bogus virtual array
     // access".
+    //    std::cerr
     return info.mem->access_virt_barray((j_common_ptr)&info,
                                         coeff_arrays[component_idx],
-                                        row_idx, 1, TRUE);
+                                        row_idx, comp_info.v_samp_factor, TRUE);
   }
 
   cv::Mat
@@ -548,25 +558,45 @@ reduceMax3D(const cv::Mat& src)
 }
 
 
+void
+print_size(const std::string& name, const cv::Mat& m)
+{
+  if (m.dims > 2)
+    std::cerr << name << " size is :" << m.size[0] << "x" << m.size[1] << "x" << m.size[2] << "\n";
+  else
+    std::cerr << name << " size is :" << m.rows << "x" << m.cols << "\n";
+ }
+
+
 cv::Mat
-reduceMaxMCU(const cv::Mat& src)
+reduceMaxMCU(const cv::Mat& src, std::pair<int, int> sz_in_blks)
 {
   if (src.dims > 2)
     throw std::invalid_argument {"SRC has more than 2 dimensions"};
 
-  int MCUrows = (src.rows + 7) / 8;
-  int MCUcols = (src.cols + 7) / 8;
+  int downsampled_blk_height = DCTSIZE;
+  while (sz_in_blks.first * downsampled_blk_height < src.rows)
+    downsampled_blk_height = downsampled_blk_height * 2;
+
+  int downsampled_blk_width = DCTSIZE;
+  while (sz_in_blks.second * downsampled_blk_width < src.cols)
+    downsampled_blk_width = downsampled_blk_width * 2;
+
+  const int MCUrows = ((src.rows + downsampled_blk_height -1)
+                       / downsampled_blk_height);
+  const int MCUcols = ((src.cols + downsampled_blk_width -1)
+                       / downsampled_blk_width);
 
   cv::Mat dst;
   cv::copyMakeBorder(src, dst,
-                     0, (MCUrows * 8) - src.rows,
-                     0, (MCUcols * 8) - src.cols,
+                     0, (MCUrows * downsampled_blk_height) - src.rows,
+                     0, (MCUcols * downsampled_blk_width) - src.cols,
                      cv::BorderTypes::BORDER_CONSTANT,
                      cv::Scalar(false));
 
-  dst = dst.reshape(1, MCUcols * MCUrows * 8);
+  dst = dst.reshape(1, MCUcols * MCUrows * downsampled_blk_width);
   cv::reduce(dst, dst, 1, cv::ReduceTypes::REDUCE_MAX);
-  dst = dst.reshape(1, MCUrows * 8);
+  dst = dst.reshape(1, MCUrows * DCTSIZE);
 
   cv::transpose(dst, dst);
   dst = dst.reshape(1, MCUrows * MCUcols);
@@ -583,19 +613,54 @@ void
 merge(JPEGDecompressor& src, const cv::Mat& src_img,
       JPEGDecompressor& mod, const cv::Mat& mod_img)
 {
-  cv::Mat MCUmask = reduceMaxMCU(reduceMax3D(src_img != mod_img));
-  assert (MCUmask.rows == src.info.MCU_rows_in_scan
-          && MCUmask.cols == src.info.MCUs_per_row);
+  // Different image components may have different sampling values,
+  // i.e., a single MCU may cover a different number of blocks in
+  // different components so we need to compute different masks for
+  // each component.  However, most channels use the same sampling so
+  // instead of recreating the mask for each component, we use a map
+  // and create it only once for each sampling used.
+  //
+  // Note that sampling notation used in jpeglib uses sampling factors
+  // instead of the common J:a:b notation.  See
+  // https://zpl.fi/chroma-subsampling-and-jpeg-sampling-factors/ for
+  // an explanation.
 
-  for (int comp_idx = 0; comp_idx < src.info.num_components; ++comp_idx) {
-    for (int row_idx = 0; row_idx < MCUmask.rows ; ++row_idx) {
-      bool* MCUptr = MCUmask.ptr<bool>(row_idx);
-      JBLOCKARRAY src_buf = src.get_coeff_for_row(comp_idx, row_idx);
-      JBLOCKARRAY mod_buf = mod.get_coeff_for_row(comp_idx, row_idx);
-      for (int col_idx = 0; col_idx < MCUmask.cols; ++col_idx) {
-        if (MCUptr[col_idx])
-          for (int i = 0; i < DCTSIZE2; ++i)
-            src_buf[0][col_idx][i] = mod_buf[0][col_idx][i];
+  std::map<std::pair<int, int>, cv::Mat> sz_in_blk_to_mask;
+  cv::Mat flat_mask = reduceMax3D(src_img != mod_img);
+  for (int comp_idx = 0; comp_idx < src.info.num_components; comp_idx++) {
+    jpeg_component_info comp_info = src.info.comp_info[comp_idx];
+    std::pair<int, int> sz_in_blk {comp_info.height_in_blocks,
+                                   comp_info.width_in_blocks};
+    if (sz_in_blk_to_mask.find(sz_in_blk) == sz_in_blk_to_mask.end())
+      sz_in_blk_to_mask[sz_in_blk] = reduceMaxMCU(flat_mask, sz_in_blk);
+  }
+
+  for (int comp_idx = 0; comp_idx < src.info.num_components; comp_idx++) {
+    jpeg_component_info comp_info = src.info.comp_info[comp_idx];
+    std::pair<int, int> sz_in_blk {comp_info.height_in_blocks,
+                                   comp_info.width_in_blocks};
+    cv::Mat blk_mask = sz_in_blk_to_mask[sz_in_blk];
+
+    // We can't loop over each row directly.  Each time we get the
+    // coefficients, we get rows equal to the number of vertical
+    // sampling factor.  We then loop over each of the row acquired.
+    for (int blk_y = 0;
+         blk_y < comp_info.height_in_blocks;
+         blk_y += comp_info.v_samp_factor) {
+      JBLOCKARRAY src_buf = src.get_coeff_for_row(comp_idx, blk_y);
+      JBLOCKARRAY mod_buf = mod.get_coeff_for_row(comp_idx, blk_y);
+      for (int offset_y = 0;
+           offset_y < comp_info.v_samp_factor;
+           offset_y++) {
+
+        // For each true element in the mask, copy all the
+        // coefficients to the related DCT block.
+        bool* mask_ptr = blk_mask.ptr<bool>(blk_y + offset_y);
+        for (int blk_x = 0; blk_x < comp_info.width_in_blocks; blk_x++)
+          if (mask_ptr[blk_x])
+            for (int k = 0; k < DCTSIZE2; k++)
+              src_buf[offset_y][blk_x][k] = mod_buf[offset_y][blk_x][k];
+
       }
     }
   }
@@ -712,13 +777,13 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
   JPEGDecompressor src {srcfile};
   src.info.buffered_image = TRUE;
 
-  if (src.maybe_has_jfif_thumbnail()) {
-    std::cerr << "This image might have a thumbnail.\n";
-    return 1;
-  } else if (src.is_progressive()) {
-    std::cerr << "This file has progressive mode.\n";
-    return 1;
-  }
+  // if (src.maybe_has_jfif_thumbnail()) {
+  //   std::cerr << "This image might have a thumbnail.\n";
+  //   return 1;
+  // } else if (src.is_progressive()) {
+  //   std::cerr << "This file has progressive mode.\n";
+  //   return 1;
+  // }
 
   JPEGCompressor dst {dstfile};
 
@@ -746,7 +811,6 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
   //
   //   * save_markers must happen before jpeg_read_header
   dst.copy_critical_parameters_from(src);
-
   dst.info.optimize_coding = do_optimisation;
 
   dst.info.arith_code = src.info.arith_code;

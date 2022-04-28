@@ -54,7 +54,7 @@
 //     that each region will display at most 8 blocks across each
 //     axis.
 //
-//     Regions are defined with `xi,yi,width,height` in pixels units.
+//     Regions are defined with `x0,x1,y0,y1` in pixels units.
 //     Multiple regions can be defined.
 //
 //     Metadata is copied intact.  However, if a JFIF thumbnail is
@@ -141,15 +141,25 @@ static_assert(sizeof(JSAMPLE) == 1,
               "libjpeg not built with BITS_IN_JSAMPLE == 8");
 
 
+void
+print_size(const std::string& name, const cv::Mat& m)
+{
+  if (m.dims > 2)
+    std::cerr << name << " size is :" << m.size[0] << "x" << m.size[1] << "x" << m.size[2] << "\n";
+  else
+    std::cerr << name << " size is (rows x cols):" << m.rows << "x" << m.cols << "\n";
+ }
+
+
 class BoundingBox {
 public:
   const int x0;
-  const int y0;
   const int x1;
+  const int y0;
   const int y1;
 
-  BoundingBox(const int x0, const int y0, const int x1, const int y1)
-     : x0{x0}, y0{y0}, x1{x1}, y1{y1}
+  BoundingBox(const int x0, const int x1, const int y0, const int y1)
+     : x0{x0}, x1{x1}, y0{y0}, y1{y1}
   {}
 
   int
@@ -173,17 +183,17 @@ public:
   static BoundingBox
   from_cmdline_arg(const std::string& arg)
   {
-    int x0, y0, width, height;
+    int x0, x1, y0, y1;
     std::stringstream argss(arg);
     std::string sep("   ");
     if (! (argss >> x0 >> sep[0]
-           >> y0 >> sep[1]
-           >> width >> sep[2]
-           >> height)
+           >> x1 >> sep[1]
+           >> y0 >> sep[2]
+           >> y1)
         || sep != ",,,"
         || ! argss.eof())
       throw std::invalid_argument("failed to parse BB from '" + arg + "'");
-    return BoundingBox{x0, y0, x0 + width, y0 + height};
+    return BoundingBox{x0, x1, y0, y1};
   }
 
   // New BB expanded to include all MCUs under the original BB.
@@ -191,17 +201,17 @@ public:
   expanded_to_MCU() const
   {
     const int x_x0 = x0 /8 *8;
-    const int x_y0 = y0 /8 *8;
     const int x_x1 = (x1 + (8 -1)) /8 *8;
+    const int x_y0 = y0 /8 *8;
     const int x_y1 = (y1 + (8 -1)) /8 *8;
-    return BoundingBox{x_x0, x_y0, x_x1, x_y1};
+    return BoundingBox{x_x0, x_x1, x_y0, x_y1};
   }
 
   // New BB expanded by l on all directions.
   BoundingBox
   expand_by(const int l) const
   {
-    return BoundingBox{x0 -l, y0 -l, x1 +l, y1 +l};
+    return BoundingBox{x0 -l, x1 +l, y0 -l, y1 +l};
   }
 
   BoundingBox
@@ -209,8 +219,8 @@ public:
   {
     return BoundingBox{
       (x0 < 0) ? 0 : x0,
-      (y0 < 0) ? 0 : y0,
       (x1 < ncols) ? x1 : ncols -1,
+      (y0 < 0) ? 0 : y0,
       (y1 < nrows) ? y1 : nrows -1,
     };
   }
@@ -556,16 +566,6 @@ reduceMax3D(const cv::Mat& src)
   assert (dst.size[0] == src.size[0] && dst.size[1] == src.size[1]);
   return dst;
 }
-
-
-void
-print_size(const std::string& name, const cv::Mat& m)
-{
-  if (m.dims > 2)
-    std::cerr << name << " size is :" << m.size[0] << "x" << m.size[1] << "x" << m.size[2] << "\n";
-  else
-    std::cerr << name << " size is :" << m.rows << "x" << m.cols << "\n";
- }
 
 
 cv::Mat

@@ -10,7 +10,7 @@ avoiding the introduction of new compression artefacts outside the
 blurred region.  The blurring approach is the same as the one
 described in [Yang et al, 2021](https://arxiv.org/abs/2103.06191).
 
-jpegblu also preserves all metadata by copying all extra markers,
+jpegblur also preserves all metadata by copying all extra markers,
 similar to jpegtran, a program distributed with libjpeg for lossless
 transformation of JPEG files.
 
@@ -23,7 +23,7 @@ metadata.
 Usage
 -----
 
-    jpegblur [xi,yi,width,height ...] < input.jpg > output.jpg
+    jpegblur [x0,x1,y0,y1 ...] < input.jpg > output.jpg
 
 See the source code for a man page style documentation.
 

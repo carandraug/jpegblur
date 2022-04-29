@@ -43,24 +43,20 @@
 //     jpegblur takes bounding boxes from command line and returns a
 //     JPEG image with those regions blurred.  It does this in DCT
 //     space thus avoiding the introduction of new compression
-//     artefacts.  It also preserves all metadata by copying all extra
-//     markers.
-//
-//     Regions to be blurred are expanded to include all MCUs (Minimum
-//     Coded Unit, the 8x8 pixel squares) under them.  Blurring is
-//     done by keeping the DC coefficient of each component and
-//     zeroing all AC coefficients, effectively generating a block
-//     with the base hue.  In addition, multiple MCUs are merged so
-//     that each region will display at most 8 blocks across each
-//     axis.
+//     artefacts outside the blurred region.  The blurring approach is
+//     the same as the one described in [Yang et al,
+//     2021](https://arxiv.org/abs/2103.06191).  jpegblur also
+//     preserves all metadata by copying all extra markers.
 //
 //     Regions are defined with `x0,x1,y0,y1` in pixels units.
-//     Multiple regions can be defined.
+//     Multiple regions can be passed as separate arguments, like so:
+//
+//         jpegblur  x0,x1,y0,y1  x0,x1,y0,y1
 //
 //     Metadata is copied intact.  However, if a JFIF thumbnail is
-//     identified jpegblu will error since blurring of the same region
-//     in the thumbnail is not implemented.  For the same reason,
-//     jpegblur will fail if the file uses progressive mode.
+//     identified jpegblur will error since blurring of the same
+//     region in the thumbnail is not implemented.  For the same
+//     reason, jpegblur will fail if the file uses progressive mode.
 //
 //     Ideally, calling `jpegblur` without any region should output a
 //     file that is exactly the same byte by byte.  However, encoding
@@ -68,10 +64,22 @@
 //     Recommend to test this first and adjust source as required and
 //     try with the `--no-optimise` option.
 //
+//     When using the `--pixelate` option, regions to be blurred are
+//     expanded to include all MCUs (Minimum Coded Unit, the 8x8 pixel
+//     squares) under them.  Blurring is done by keeping the DC
+//     coefficient of each component and zeroing all AC coefficients,
+//     effectively generating a block with the base hue.  In addition,
+//     multiple MCUs are merged so that each region will display at
+//     most 8 blocks across each axis.
+//
 // OPTIONS
 //
 //    --no-optimise
 //        Do not perform optimization of entropy encoding parameters.
+//
+//    --pixelate
+//        Pixelate/mosaic region instead of blurring.  This is a lot
+//        faster and is not dependent on OpenCV.
 //
 // VALIDATION
 //
@@ -95,19 +103,19 @@
 //     Blur the top left 10x10 pixels (will be expanded to blur the
 //     top-left 16x16 pixels):
 //
-//         jpegblur 0,0,10,10 < foo.jpg > bar.jpg
+//         jpegblur 0,10,0,10 < foo.jpg > bar.jpg
 //
 //     Blur the top left 10x10 pixels (will be expanded to blur the
 //     top-left 16x16 pixels) and a 200 pixels wide row in the middle
 //     of the image (will be expanded to a 8x200 pixels):
 //
-//         jpegblur 0,0,10,10 500,500,200,1 < foo.jpg > bar.jpg
+//         jpegblur 0,10,0,10 500,700,500,501 < foo.jpg > bar.jpg
 //
 //    Copy the image without any blurring (ideally it should produce
 //    the same file as the input):
 //
-//         jpegblur < foo.jpg > bar.jpg
-//         md5sum foo.jpg bar.jpg
+//         md5sum foo.jpg
+//         jpegblur < foo.jpg | md5sum
 //
 // CAVEATS
 //

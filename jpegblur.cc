@@ -602,7 +602,7 @@ reduceMaxMCU(const cv::Mat& src, std::pair<int, int> sz_in_blks)
                      cv::BorderTypes::BORDER_CONSTANT,
                      cv::Scalar(false));
 
-  dst = dst.reshape(1, MCUcols * MCUrows * downsampled_blk_width);
+  dst = dst.reshape(1, MCUcols * MCUrows * downsampled_blk_height);
   cv::reduce(dst, dst, 1, cv::ReduceTypes::REDUCE_MAX);
   dst = dst.reshape(1, MCUrows * downsampled_blk_height);
 

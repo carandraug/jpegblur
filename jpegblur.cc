@@ -64,6 +64,19 @@
 //     settings are tricky to reproduce so test this first and report
 //     any issues found.
 //
+//     In addition, markers within a segment can be within any order
+//     and it is not possible to copy the original order without
+//     creating a much lower level library.  For example, some images
+//     emit all AC Huffman tables and then all DC Huffman tables while
+//     others interleave them.  Other files emit the restart interval
+//     at the end of the segment while others emit it in the middle.
+//     The order in a file can be checked with:
+//
+//         djpeg -verbose -verbose PATH-TO-FILE > /dev/null
+//
+//    In the case of libjpeg-turbo, the order the markers are emitted
+//    can be "changed" by editing `write_scan_header` in `jcmarker.c`.
+//
 //     When using the `--pixelate` option, regions to be blurred are
 //     expanded to include all MCUs (Minimum Coded Unit, the 8x8 pixel
 //     squares) under them.  Blurring is done by keeping the DC

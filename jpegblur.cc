@@ -826,6 +826,8 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
 
   dst.info.arith_code = src.info.arith_code;
 
+  dst.info.restart_interval = src.info.restart_interval;
+
   dst.copy_coefficients_from(src);
   dst.copy_markers_from(src);
 

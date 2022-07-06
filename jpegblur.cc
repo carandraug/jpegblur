@@ -36,7 +36,7 @@
 //
 // SYNOPSIS
 //
-//     jpegblur [--no-optimise] [BOUNDING-BOX ...] < IN_JPEG > OUT_JPEG
+//     jpegblur [BOUNDING-BOX ...] < IN_JPEG > OUT_JPEG
 //
 // DESCRIPTION
 //
@@ -46,7 +46,8 @@
 //     artefacts outside the blurred region.  The blurring approach is
 //     the same as the one described in [Yang et al,
 //     2021](https://arxiv.org/abs/2103.06191).  jpegblur also
-//     preserves all metadata by copying all extra markers.
+//     preserves all metadata by copying all extra markers and
+//     encoding/decoding parameters.
 //
 //     Regions are defined with `x0,x1,y0,y1` in pixels units.
 //     Multiple regions can be passed as separate arguments, like so:
@@ -60,9 +61,8 @@
 //
 //     Ideally, calling `jpegblur` without any region should output a
 //     file that is exactly the same byte by byte.  However, encoding
-//     settings are not readable and may be tricky to reproduce.
-//     Recommend to test this first and adjust source as required and
-//     try with the `--no-optimise` option.
+//     settings are tricky to reproduce so test this first and report
+//     any issues found.
 //
 //     When using the `--pixelate` option, regions to be blurred are
 //     expanded to include all MCUs (Minimum Coded Unit, the 8x8 pixel
@@ -73,9 +73,6 @@
 //     most 8 blocks across each axis.
 //
 // OPTIONS
-//
-//    --no-optimise
-//        Do not perform optimization of entropy encoding parameters.
 //
 //    --pixelate
 //        Pixelate/mosaic region instead of blurring.  This is a lot
@@ -779,8 +776,7 @@ pixelate_regions(const JPEGDecompressor& src,
 
 int
 jpegblur(std::FILE *srcfile, std::FILE *dstfile,
-         const std::vector<BoundingBox>& bounding_boxes,
-         bool do_optimisation)
+         const std::vector<BoundingBox>& bounding_boxes)
 {
   JPEGDecompressor src {srcfile};
   src.info.buffered_image = TRUE;
@@ -814,12 +810,19 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
   //
   // Some things that I have already found cause issues:
   //
-  //   * Setting dstinfo.optimize_coding must happen after calling
-  //     jpeg_copy_critical_parameters
-  //
   //   * save_markers must happen before jpeg_read_header
   dst.copy_critical_parameters_from(src);
-  dst.info.optimize_coding = do_optimisation;
+
+  // copy_critical_parameters_from copies many things such as the
+  // original quantisation tables but not the Huffman tables and
+  // others parameters that may be changed without changing decoded
+  // pixel values.  However, we want to keep as much as possible, so
+  // we copy those ourselves.
+  dst.info.optimize_coding = FALSE;
+  for (int i = 0; i < NUM_HUFF_TBLS; i++) {
+    dst.info.ac_huff_tbl_ptrs[i] = src.info.ac_huff_tbl_ptrs[i];
+    dst.info.dc_huff_tbl_ptrs[i] = src.info.dc_huff_tbl_ptrs[i];
+  }
 
   dst.info.arith_code = src.info.arith_code;
 
@@ -839,18 +842,10 @@ main(int argc, char *argv[])
   std::vector<BoundingBox> bounding_boxes;
   bool do_pixelation = false;
 
-  // We don't know if the input file used an optimised coding table so
-  // we need this as an command line option (this is the same that
-  // jpegtran does).  The user needs to try both options and without
-  // any bounding box and find which one would return the same file.
-  bool do_optimisation = true;
-
   for (int i = 1; i < argc; ++i) {
     std::string arg {argv[i]};
-    if ((i == 1 || i == 2) && arg == "--pixelate")
+    if (i == 1 && arg == "--pixelate")
       do_pixelation = true;
-    if ((i == 1 || i == 2) && arg == "--no-optimise")
-      do_optimisation = false;
     else
       bounding_boxes.push_back(BoundingBox::from_cmdline_arg(arg));
   }
@@ -860,5 +855,5 @@ main(int argc, char *argv[])
     return 1;
   }
 
-  return jpegblur(infile, outfile, bounding_boxes, do_optimisation);
+  return jpegblur(infile, outfile, bounding_boxes);
 }

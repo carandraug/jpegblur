@@ -33,3 +33,4 @@ Build
 There is a `Makefile`.  With a single C++ file and dependency on
 libjpeg and OpenCV, the build is relatively simple and no attempt has
 been made to cover special cases.  Probably only works on Linux.
+See also the Dockerfile.

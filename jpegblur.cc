@@ -148,7 +148,6 @@
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/core/types.hpp>
-#include <opencv2/highgui.hpp>
 
 
 // We could adjust the size of individual Mat elements when reading

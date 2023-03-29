@@ -12,12 +12,14 @@ RUN apt-get update \
         g++ \
         make \
         libjpeg62-turbo-dev \
-        libopencv-core-dev \
-        libopencv-imgproc-dev \
+        libopencv-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY ./ /usr/local/src/
+WORKDIR /root/jpegblur
 
-RUN cd /usr/local/src \
-    && make jpegblur \
-    && cp jpegblur /usr/local/bin/
+COPY ./ ./
+
+RUN autogen.sh \
+    && configure \
+    && make \
+    && make install

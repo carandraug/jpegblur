@@ -20,6 +20,7 @@ Do note that there may be PII on the metadata and it will be copied
 across untouched.  Some other tool can be used to inspect the
 metadata.
 
+
 Usage
 -----
 
@@ -27,10 +28,18 @@ Usage
 
 See the source code for a man page style documentation.
 
+
 Build
 -----
 
-There is a `Makefile`.  With a single C++ file and dependency on
-libjpeg and OpenCV, the build is relatively simple and no attempt has
-been made to cover special cases.  Probably only works on Linux.
-See also the Dockerfile.
+You should install this from release sources and follow the standard
+autotools dance of:
+
+    ./configure
+    make
+    make install
+
+There is also a `Dockerfile` available.
+
+If you want to build from development sources or get involved into its
+development, take a peek at the `HACKING` file.

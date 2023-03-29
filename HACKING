@@ -1,0 +1,51 @@
+Hacking at jpegblur
+===================
+
+
+Build from development sources
+------------------------------
+
+If you're keen on using the development version, you need to run
+`autogen.sh` to create the `configure` script.  You'll probably also
+want to do an out of tree build.  The steps are then something like:
+
+    cd ~/src/jpegblur
+    ./autogen.sh
+    cd ~/builds/jpegblur
+    ~/src/jpegblur/configure
+    make
+    make install
+
+
+Making a release
+----------------
+
+1. Update the version number `configure.ac` and make a commit:
+
+       git commit -m "maint: release VERSION" configure.ac
+
+2. Build a source distribution from a git archive export.  Performing
+   a release from a git archive will ensure that the release will not
+   accidentally include modified or untracked files:
+
+       rm -rf target/
+       git archive --format=tar --prefix="target/" HEAD | tar -x
+       cd target/
+       ./autogen.sh
+       ./configure
+       make dist
+
+3. Check the release `target/jpegblur-$VERSION.tar.gz`
+
+4. Tag the commit and push:
+
+       git tag -a -m "Add tag release-$VERSION" release-$VERSION
+       git push upstream main
+       git push upstream release-$VERSION
+
+5. Release the file `target/jpegblur-$VERSION.tar.gz`
+
+6. Add the `+dev` to the version string in `configure.ac` and commit:
+
+       git commit -m "maint: set version to $VERSION+dev after release-$VERSION"
+       git push upstream main

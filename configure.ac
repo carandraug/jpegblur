@@ -14,6 +14,7 @@
 ## along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 AC_INIT([jpegblur], [1.0])
+AC_CONFIG_AUX_DIR([build-aux])
 AM_INIT_AUTOMAKE([foreign subdir-objects])
 AC_CONFIG_MACRO_DIRS([m4])
 

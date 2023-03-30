@@ -1,0 +1,133 @@
+.TH "JPEGBLUR" "1" "March 30, 2023" "0.0.1" "jpegblur"
+
+.SH NAME
+
+jpegblur \- "lossless" "blurring" of regions in JPEG image
+
+.SH SYNOPSIS
+
+.B jpegblur
+.RI [ BOUNDING-BOX .\|.\|.]\&
+<
+.I IN_JPEG
+>
+.I OUT_JPEG
+
+.SH DESCRIPTION
+
+.B jpegblur
+takes bounding boxes from command line and returns a JPEG image with
+those regions blurred.  It does this in DCT space thus avoiding the
+introduction of new compression artefacts outside the blurred region.
+The blurring approach is the same as the one described in [Yang et al,
+2021](https://arxiv.org/abs/2103.06191).
+.B jpegblur
+also preserves all metadata by copying all extra markers and
+encoding/decoding parameters.
+
+.PP
+Regions are defined as
+.I BOUNDING-BOX
+in the format `X0,X1,Y0,Y1` and in pixels units.  Multiple regions can
+be passed as separate arguments, like so:
+
+    jpegblur  X0,X1,Y0,Y1  X0,X1,Y0,Y1
+
+.PP
+Metadata is copied intact.  However, if a JFIF thumbnail is identified
+jpegblur will error since blurring of the same region in the thumbnail
+is not implemented.  For the same reason, jpegblur will fail if the
+file uses progressive mode.
+
+.PP
+Ideally, calling
+.B jpegblur
+without any region should output a file that is exactly the same byte
+by byte.  However, encoding settings are tricky to reproduce so test
+this first and report any issues found.
+
+.PP
+In addition, markers within a segment can be within any order and it
+is not possible to copy the original order without creating a much
+lower level library.  For example, some images emit all AC Huffman
+tables and then all DC Huffman tables while others interleave them.
+Other files emit the restart interval at the end of the segment while
+others emit it in the middle.  The order in a file can be checked
+with:
+
+    djpeg -verbose -verbose PATH-TO-FILE > /dev/null
+
+.PP
+In the case of libjpeg-turbo, the order the markers are emitted
+can be "changed" by editing `write_scan_header` in `jcmarker.c`.
+
+.PP
+When using the
+.B --pixelate
+option, regions to be blurred are expanded to include all MCUs
+(Minimum Coded Unit, the 8x8 pixel squares) under them.  Blurring is
+done by keeping the DC coefficient of each component and zeroing all
+AC coefficients, effectively generating a block with the base hue.  In
+addition, multiple MCUs are merged so that each region will display at
+most 8 blocks across each axis.
+
+.SH OPTIONS
+
+.TP
+.B \-\-pixelate
+Pixelate/mosaic region instead of blurring.  This is a lot faster and
+is not dependent on OpenCV.
+
+.SH VALIDATION
+
+The expectation is that a file exactly the same as the input is
+generated, if there is no region to blur.  There is no special
+code path in that case so we can use it to validate on our whole
+dataset.  Suppose we have a dataset in the directory `oxford`:
+
+    mkdir oxford-test
+    for FPATH in $(find oxford/ -type f -name '*jpg'); do
+        OUTFILE=$(echo $FPATH | sed 's,^oxford/,oxford-test/,')
+        jpegblur < $FPATH > $OUTFILE
+    done
+    find oxford/ -type f -name '*jpg' \\
+        | xargs md5sum | sed 's, oxford/, oxford-test/,' \\
+        > oxford.md5sums
+    md5sum --quiet --check oxford.md5sums
+
+.SH EXAMPLES
+
+.PP
+Blur the top left 10x10 pixels (will be expanded to blur the top-left
+16x16 pixels):
+
+    jpegblur 0,10,0,10 < foo.jpg > bar.jpg
+
+.PP
+Blur the top left 10x10 pixels (will be expanded to blur the top-left
+16x16 pixels) and a 200 pixels wide row in the middle of the image
+(will be expanded to a 8x200 pixels):
+
+    jpegblur 0,10,0,10 500,700,500,501 < foo.jpg > bar.jpg
+
+.PP
+Copy the image without any blurring (ideally it should produce
+the same file as the input):
+
+    md5sum foo.jpg
+    jpegblur < foo.jpg | md5sum
+
+.SH CAVEATS
+
+The region coordinates are relative to the raw image.  If, for
+example, the image is in a JPEG/Exif file and includes orientation
+metadata, that metadata is ignored.
+
+.SH AUTHOR
+
+David Miguel Susano Pinto for the Visual Geometry Group (VGG) at the
+University of Oxford.
+
+.SH REPORTING BUGS
+
+Please open bug reports at https://gitlab.com/vgg/jpegblur/

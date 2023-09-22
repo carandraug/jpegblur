@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <map>
 #include <sstream>
@@ -41,6 +42,7 @@
 #include <utility>
 #include <vector>
 
+#include <getopt.h>
 #include <jpeglib.h>
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgproc.hpp>
@@ -744,27 +746,77 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
 }
 
 
+enum class CensorType {
+   black,
+   pixelisation,
+   blurring,
+};
+
+
+struct jpegblur_conf {
+  CensorType censor_type;
+  std::vector<BoundingBox> bounding_boxes;
+};
+
+
+struct jpegblur_conf
+parse_cmdline_args (const int argc, char *argv[])
+{
+  // Defaults:
+  struct jpegblur_conf parsed_conf = {
+    CensorType::blurring,
+    {},
+  };
+
+  struct option long_options[] = {
+    {"black", no_argument, nullptr, 'k'},
+    {"blur", no_argument, nullptr, 'b'},
+    {"pixelise", no_argument, nullptr, 'p'},
+    {0, 0, 0, 0}
+  };
+
+  int option_index = 0;
+  while (1) {
+    const int c = getopt_long(argc, argv, "", long_options, &option_index);
+    if (c == -1)
+      break;
+    const char* option_name = long_options[option_index].name;
+    if (option_name == "black")
+      parsed_conf.censor_type = CensorType::black;
+    else if (option_name == "blur")
+      parsed_conf.censor_type = CensorType::blurring;
+    else if (option_name == "pixelise")
+      parsed_conf.censor_type = CensorType::pixelisation;
+    else
+      abort();
+  }
+
+  // Handle non-option ARGV elements (bounding boxes)
+  if (optind < argc) {
+    while (optind < argc) {
+      BoundingBox bbox = BoundingBox::from_cmdline_arg(argv[optind++]);
+      parsed_conf.bounding_boxes.push_back(bbox);
+    }
+  }
+ return parsed_conf;
+}
+
+
 int
-main(int argc, char *argv[])
+main(const int argc, char *argv[])
 {
   std::FILE *infile = stdin;
   std::FILE *outfile = stdout;
 
-  std::vector<BoundingBox> bounding_boxes;
-  bool do_pixelation = false;
+  struct jpegblur_conf conf = parse_cmdline_args(argc, argv);
 
-  for (int i = 1; i < argc; ++i) {
-    std::string arg {argv[i]};
-    if (i == 1 && arg == "--pixelate")
-      do_pixelation = true;
-    else
-      bounding_boxes.push_back(BoundingBox::from_cmdline_arg(arg));
-  }
-
-  if (do_pixelation) {
-    std::cerr << "Pixelation code path not merged in yet.\n";
+  if (conf.censor_type == CensorType::black) {
+    std::cerr << "Black bars censoring not yet merged in.\n";
     return 1;
+  } else if (conf.censor_type == CensorType::pixelisation) {
+    std::cerr << "Pixelisation censoring not yet merged in.\n";
+    return 1;
+  } else if (conf.censor_type == CensorType::blurring) {
+    return jpegblur(infile, outfile, conf.bounding_boxes);
   }
-
-  return jpegblur(infile, outfile, bounding_boxes);
 }

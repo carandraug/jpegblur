@@ -63,20 +63,42 @@ can be "changed" by editing `write_scan_header` in `jcmarker.c`.
 
 .PP
 When using the
-.B --pixelate
-option, regions to be blurred are expanded to include all MCUs
-(Minimum Coded Unit, the 8x8 pixel squares) under them.  Blurring is
-done by keeping the DC coefficient of each component and zeroing all
-AC coefficients, effectively generating a block with the base hue.  In
+.B --pixelise
+or the
+.B --black
+options, regions to be "blurred" are expanded but limited to
+individual DCT blocks.  Different image components may have different
+sampling factors, so the exact border of the DCT blocks may differ
+between components.  Typically, downsampling is applied to the chroma
+components and not to the luma component so the final effect is a thin
+(max of 8 pixels) shadown around the regions.  This effect could be
+avoided but the goal of jpegblur is to reduce the information being
+destroyed.
+
+.PP
+In the case of
+.B --pixelise
+the DC coefficient of each component is kept while the AC coefficients
+are zeroed, effectively generating a block with the base hue.  In
 addition, multiple MCUs are merged so that each region will display at
 most 8 blocks across each axis.
 
 .SH OPTIONS
 
 .TP
-.B \-\-pixelate
-Pixelate/mosaic region instead of blurring.  This is a lot faster and
+.B \-\-black
+Draw a black rectangle on the region instead of blurring.  This is a
+lot faster than blurring and is not dependent on OpenCV.
+
+.TP
+.B \-\-blur
+Blur the specified regions.  This is default behaviour.
+
+.TP
+.B \-\-pixelise
+Pixelise/mosaic region instead of blurring.  This is a lot faster and
 is not dependent on OpenCV.
+
 
 .SH VALIDATION
 

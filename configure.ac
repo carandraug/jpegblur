@@ -39,6 +39,15 @@ dnl modules with the .pc provided.  This will link to a lot more than
 dnl we actually need.
 PKG_CHECK_MODULES([OPENCV], [opencv])
 
+dnl We require GNU's getopt_long
+AC_CHECK_HEADER([getopt.h],
+  [AC_CHECK_FUNC([getopt_long],
+    [],
+    [AC_MSG_ERROR([getopt.h was found but getopt_long is not available])],
+  )],
+  [AC_MSG_ERROR([getopt.h file not found])],
+)
+
 
 AC_CONFIG_FILES([
  Makefile

@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -64,7 +65,78 @@ print_size(const std::string& name, const cv::Mat& m)
     std::cerr << name << " size is :" << m.size[0] << "x" << m.size[1] << "x" << m.size[2] << "\n";
   else
     std::cerr << name << " size is (rows x cols):" << m.rows << "x" << m.cols << "\n";
- }
+}
+
+
+void
+set_dc_coeff(JBLOCK& blk_buf, const JCOEF val)
+{
+  blk_buf[0] = val;
+}
+
+
+void
+zero_ac_coeffs(JBLOCK& blk_buf)
+{
+  for (int k = 1; k < DCTSIZE2; k++)
+    blk_buf[k] = 0;
+}
+
+
+// The DCT values in libjpeg are scaled up by a factor of 8 (see
+// comments in jdct.h and my own questions and answers at
+// https://groups.google.com/g/libjpeg-turbo-users/c/xccDfgwaZ8s/m/Hojzw1rhAAAJ
+// and
+// https://stackoverflow.com/questions/77189208/colour-jpeg-block-black-by-modifying-ac-coefficient/
+// )
+constexpr JCOEF JCOEF_MIN = -CENTERJSAMPLE * 8;
+constexpr JCOEF JCOEF_ZERO = 0;
+constexpr JCOEF JCOEF_MAX = (CENTERJSAMPLE -1) * 8;  // Not sure of the -1 here
+
+
+// This returns quantized DC values, same as libjpeg.
+std::vector<JCOEF>
+dc_values_for_black(const jpeg_decompress_struct& info)
+{
+  std::vector<JCOEF> dc_values;
+  switch (info.jpeg_color_space) {
+  case JCS_YCbCr:
+    dc_values = {JCOEF_MIN, JCOEF_ZERO, JCOEF_ZERO};
+    break;
+  case JCS_GRAYSCALE:
+    dc_values = {JCOEF_MIN};
+    break;
+  case JCS_RGB:
+    dc_values = {JCOEF_MIN, JCOEF_MIN, JCOEF_MIN};
+    break;
+  case JCS_CMYK:
+    dc_values = {JCOEF_MAX, JCOEF_MAX, JCOEF_MAX, JCOEF_MAX};
+    break;
+  case JCS_YCCK:
+    dc_values = {JCOEF_MIN, JCOEF_ZERO, JCOEF_ZERO, JCOEF_MAX};
+    break;
+  // While J_COLOR_SPACE defines many other color spaces, they are
+  // only used for out_color_space or in_color_space.  Here, we only
+  // care about color spaces used for jpeg_color_space.
+  default:
+    throw std::invalid_argument("invalid color space");
+  }
+  assert((dc_values.size() == info.num_components)
+         && "Number of DC values differs from the number of image components");
+
+  // Quantization step
+  for (int ci = 0; ci < info.num_components; ci++) {
+    const int quant_tbl_no = info.comp_info[ci].quant_tbl_no;
+    const UINT16 dc_quant = info.quant_tbl_ptrs[quant_tbl_no]->quantval[0];
+
+    // Round towards closest infinity (away from zero)
+    if (dc_values[ci] < 0)
+      dc_values[ci] = (dc_values[ci] - dc_quant +1) / dc_quant;
+    else if (dc_values[ci] > 0)
+      dc_values[ci] = (dc_values[ci] + dc_quant -1) / dc_quant;
+  }
+  return dc_values;
+}
 
 
 class BoundingBox {
@@ -93,7 +165,7 @@ public:
   void
   print() const
   {
-    std::cerr << "[" << x0<< ", " << y0 << ", " << x1 <<", " << y1 << "]\n";
+    std::cerr << "[" << x0<< ":" << x1 << ", " << y0 <<":" << y1 << "]\n";
   }
 
   static BoundingBox
@@ -110,6 +182,29 @@ public:
         || ! argss.eof())
       throw std::invalid_argument("failed to parse BB from '" + arg + "'");
     return BoundingBox{x0, x1, y0, y1};
+  }
+
+
+  // Convert bounding box from real image size to DCT block of the
+  // downsampled image (may be different for each image component).
+  BoundingBox
+  to_blocks(const int h_samp_factor, const int max_h_samp_factor,
+            const int v_samp_factor, const int max_v_samp_factor) const
+  {
+    return BoundingBox{
+      static_cast<int>(std::floor(x0 * h_samp_factor
+                                  / static_cast<double>(max_h_samp_factor)
+                                  / DCTSIZE)),
+      static_cast<int>(std::ceil(x1 * h_samp_factor
+                                  / static_cast<double>(max_h_samp_factor)
+                                  / DCTSIZE)),
+      static_cast<int>(std::floor(y0 * v_samp_factor
+                                 / static_cast<double>(max_v_samp_factor)
+                                 / DCTSIZE)),
+      static_cast<int>(std::ceil(y1 * v_samp_factor
+                                 / static_cast<double>(max_v_samp_factor)
+                                 / DCTSIZE)),
+    };
   }
 
   // New BB expanded to include all MCUs under the original BB.
@@ -746,6 +841,97 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
 }
 
 
+void
+black_bar(JPEGDecompressor& src,
+          const BoundingBox& bbox)
+{
+  jvirt_barray_ptr *src_coef_arrays = jpeg_read_coefficients(&src.info);
+
+  // During image encoding, each image component is first downsampled
+  // and then blocks (8x8 array of samples/pixels) are FDCT computed.
+  // Because different image components may have different sampling
+  // factors, DCT blocks at the positions may cover slightly different
+  // regions of the real image.
+  //
+  // We could make the maths to ensure that we always affect exactly
+  // the same image region.  However, our goal is to minimise the
+  // changes to the original image and so we limit the changes as much
+  // as we can.  The final effect is that if the image has any
+  // downsampling (most do), the borders will have a "shadow".  This
+  // is because we had to destroy the chroma components but managed to
+  // leave the luma component intact.
+  //
+  // For example, if we have to censor the top left 8x8 pixels of an
+  // image with "2x2,1x1,1x1" sampling factors (downsample the Cb and
+  // Cr components by a factor of 2 in both horizontal and vertical
+  // directions), then we are destroy the the top-left 8x8 pixels of Y
+  // component but on the Cb and Cr component we destroy the top left
+  // 16x16 pixels.
+
+  const std::vector<JCOEF> black_dc = dc_values_for_black(src.info);
+
+  for (int ci = 0; ci < src.info.num_components; ci++) {
+    jpeg_component_info comp_info = src.info.comp_info[ci];
+
+    const BoundingBox blk_bbox = bbox.to_blocks(comp_info.h_samp_factor,
+                                                src.info.max_h_samp_factor,
+                                                comp_info.v_samp_factor,
+                                                src.info.max_v_samp_factor);
+
+    for (int blk_y = blk_bbox.y0;
+         blk_y < blk_bbox.y1;
+         blk_y += comp_info.v_samp_factor) {
+      JBLOCKARRAY buffer = src.info.mem->access_virt_barray((j_common_ptr)&src.info,
+                                                            src_coef_arrays[ci],
+                                                            blk_y,
+                                                            comp_info.v_samp_factor,
+                                                            TRUE);
+      for (int offset_y = 0; offset_y < comp_info.v_samp_factor; offset_y++) {
+        for (int blk_x = blk_bbox.x0; blk_x < blk_bbox.x1; blk_x++) {
+          set_dc_coeff(buffer[offset_y][blk_x], black_dc[ci]);
+          zero_ac_coeffs(buffer[offset_y][blk_x]);
+        }
+      }
+    }
+  }
+}
+
+
+int
+jpegblack(std::FILE *srcfile, std::FILE *dstfile,
+          const std::vector<BoundingBox>& bounding_boxes)
+{
+  // We modify the coefficients on src and later copy them to dst.
+  //
+  // We iterate over the image rows once per bbox.  This is pretty
+  // fast but for a large number of bboxes I wonder if it makes more
+  // sense to work on iterating over the image only once (and write to
+  // dst as we go along).
+  JPEGDecompressor src {srcfile};
+  for (auto bbox : bounding_boxes)
+    black_bar(src, bbox);
+
+
+  JPEGCompressor dst {dstfile};
+  dst.copy_critical_parameters_from(src);
+
+  // These are non-critical parameters because they can be changed
+  // without causing changes to the actual pixel values.
+  dst.info.optimize_coding = FALSE;
+  for (int i = 0; i < NUM_HUFF_TBLS; i++) {
+    dst.info.ac_huff_tbl_ptrs[i] = src.info.ac_huff_tbl_ptrs[i];
+    dst.info.dc_huff_tbl_ptrs[i] = src.info.dc_huff_tbl_ptrs[i];
+  }
+  dst.info.arith_code = src.info.arith_code;
+  dst.info.restart_interval = src.info.restart_interval;
+  dst.info.arith_code = src.info.arith_code;
+  dst.info.restart_interval = src.info.restart_interval;
+
+  dst.copy_coefficients_from(src);
+  dst.copy_markers_from(src);
+  return 0;
+}
+
 enum class CensorType {
    black,
    pixelisation,
@@ -811,8 +997,7 @@ main(const int argc, char *argv[])
   struct jpegblur_conf conf = parse_cmdline_args(argc, argv);
 
   if (conf.censor_type == CensorType::black) {
-    std::cerr << "Black bars censoring not yet merged in.\n";
-    return 1;
+    return jpegblack(infile, outfile, conf.bounding_boxes);
   } else if (conf.censor_type == CensorType::pixelisation) {
     std::cerr << "Pixelisation censoring not yet merged in.\n";
     return 1;

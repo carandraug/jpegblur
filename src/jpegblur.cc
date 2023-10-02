@@ -283,6 +283,7 @@ public:
     // We use buffered-image mode because we want to keep the
     // full-image coefficient array in memory.  If not, coefficients
     // are discarded as we scan each line of the image.
+    info.buffered_image = TRUE;
   }
 
   bool
@@ -785,7 +786,6 @@ jpegblur(std::FILE *srcfile, std::FILE *dstfile,
          const std::vector<BoundingBox>& bounding_boxes)
 {
   JPEGDecompressor src {srcfile};
-  src.info.buffered_image = TRUE;
 
   // if (src.maybe_has_jfif_thumbnail()) {
   //   std::cerr << "This image might have a thumbnail.\n";

@@ -19,7 +19,12 @@ WORKDIR /root/jpegblur
 
 COPY ./ ./
 
-RUN autogen.sh \
+## Only run autogen.sh if we're building from development sources.  If
+## we're building from a distribution tarball, autogen.sh is not even
+## there.
+RUN if [ -e "autogen.sh" ]; then \
+      autogen.sh \
+    fi \
     && configure \
     && make \
     && make install

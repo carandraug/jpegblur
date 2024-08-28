@@ -34,6 +34,7 @@ Making a release
        ./autogen.sh
        ./configure
        make dist
+       make distcheck
 
 3. Check the release `target/jpegblur-$VERSION.tar.gz`
 

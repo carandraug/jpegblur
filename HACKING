@@ -37,19 +37,21 @@ Making a release
        ./configure
        make dist
        make distcheck
+       cd ..
 
-3. Check the release file `target/jpegblur-$VERSION.tar.gz`
-
-4. Tag the commit and push:
+3. Tag the commit used to build the distribution:
 
        git tag -a -m "Add tag release-$VERSION" release-$VERSION
-       git push upstream main
-       git push upstream release-$VERSION
+
+4. Add the `+dev` to the version string in `configure.ac`, add an
+   empty section for the next version in the `NEWS` file, and commit:
+
+       git commit -m "maint: set version to $VERSION+dev after release-$VERSION" \
+           configure.ac NEWS
 
 5. Release the file `target/jpegblur-$VERSION.tar.gz`
 
-6. Add the `+dev` to the version string in `configure.ac`, add a
-   section for the next version in the `NEWS` file, and commit:
+6. Push the new commits and tags:
 
-       git commit -m "maint: set version to $VERSION+dev after release-$VERSION"
        git push upstream main
+       git push upstream release-$VERSION

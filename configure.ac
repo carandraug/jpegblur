@@ -57,8 +57,8 @@ dnl      those modules with the .pc provided.  So we end up linking to
 dnl      a lot more than we actually need.
 
 PKG_CHECK_MODULES([OPENCV], [opencv],
-   [],  # do nothing different if found
-   [PKG_CHECK_MODULES([OPENCV], [opencv4])],
+  [],  # do nothing different if found
+  [PKG_CHECK_MODULES([OPENCV], [opencv4])],
 )
 
 dnl AC_CHECK_HEADER 4th arg is a list of extra include directories but
@@ -66,7 +66,10 @@ dnl we have a list of CXXFLAGS not a list of directories.  So modify,
 dnl temporarily, CXXFLAGS for the test.
 save_CXXFLAGS="$CXXFLAGS"
 CXXFLAGS="$CXXFLAGS $OPENCV_CFLAGS"
-AC_CHECK_HEADER([opencv2/imgproc.hpp])
+AC_CHECK_HEADER([opencv2/imgproc.hpp],
+  [],  # for now, do nothing different if found
+  [AC_MSG_ERROR([opencv2/imgproc.hpp not found])]
+)
 CXXFLAGS="$save_CXXFLAGS"
 
 

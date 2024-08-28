@@ -20,9 +20,11 @@ want to do an out of tree build.  The steps are then something like:
 Making a release
 ----------------
 
-1. Update the version number `configure.ac` and make a commit:
+1. Update the version number in `configure.ac` and in the NEWS file
+   and make a commit:
 
-       git commit -m "maint: release VERSION" configure.ac
+       VERSION="NEW-VERSION-NUMBER"
+       git commit -m "maint: release $VERSION" configure.ac NEWS
 
 2. Build a source distribution from a git archive export.  Performing
    a release from a git archive will ensure that the release will not
@@ -36,7 +38,7 @@ Making a release
        make dist
        make distcheck
 
-3. Check the release `target/jpegblur-$VERSION.tar.gz`
+3. Check the release file `target/jpegblur-$VERSION.tar.gz`
 
 4. Tag the commit and push:
 
@@ -46,7 +48,8 @@ Making a release
 
 5. Release the file `target/jpegblur-$VERSION.tar.gz`
 
-6. Add the `+dev` to the version string in `configure.ac` and commit:
+6. Add the `+dev` to the version string in `configure.ac`, add a
+   section for the next version in the `NEWS` file, and commit:
 
        git commit -m "maint: set version to $VERSION+dev after release-$VERSION"
        git push upstream main

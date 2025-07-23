@@ -9,6 +9,7 @@ FROM debian:buster
 
 RUN apt-get update \
     && apt-get install -y \
+        autoconf \
         g++ \
         make \
         libjpeg62-turbo-dev \
@@ -23,8 +24,8 @@ COPY ./ ./
 ## we're building from a distribution tarball, autogen.sh is not even
 ## there.
 RUN if [ -e "autogen.sh" ]; then \
-      autogen.sh \
+      ./autogen.sh; \
     fi \
-    && configure \
+    && ./configure \
     && make \
     && make install

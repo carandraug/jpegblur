@@ -33,7 +33,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
-#include <cstdio>
+#include <cstdio>  // required by jpeglib.h
 #include <cstdlib>
 #include <iostream>
 #include <map>

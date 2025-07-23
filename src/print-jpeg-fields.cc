@@ -16,6 +16,7 @@
 // This program prints all the values in a jpeg_decompress_struct and
 // associated jpeg_component_info.  It is used for debugging.
 
+#include <cstdio>  // required by jpeglib.h
 #include <iostream>
 #include <jpeglib.h>
 

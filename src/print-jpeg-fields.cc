@@ -16,6 +16,8 @@
 // This program prints all the values in a jpeg_decompress_struct and
 // associated jpeg_component_info.  It is used for debugging.
 
+#include <config.h>
+
 #include <cstdio>  // required by jpeglib.h
 #include <iostream>
 #include <jpeglib.h>
@@ -183,7 +185,12 @@ main(int argc, char *argv[])
     PRINT_COMP_FIELD_VALUE(ac_tbl_no);
     PRINT_COMP_FIELD_VALUE(width_in_blocks);
     PRINT_COMP_FIELD_VALUE(height_in_blocks);
+#if defined HAVE_JPEG_COMPONENT_INFO_DCT_SCALED_SIZE
     PRINT_COMP_FIELD_VALUE(DCT_scaled_size);
+#else
+    PRINT_COMP_FIELD_VALUE(DCT_h_scaled_size);
+    PRINT_COMP_FIELD_VALUE(DCT_v_scaled_size);
+#endif
     PRINT_COMP_FIELD_VALUE(downsampled_width);
     PRINT_COMP_FIELD_VALUE(downsampled_height);
     PRINT_COMP_FIELD_VALUE(component_needed);

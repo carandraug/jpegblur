@@ -14,6 +14,7 @@
 ## along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 AC_INIT([jpegblur], [1.0+dev])
+AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_AUX_DIR([build-aux])
 AM_INIT_AUTOMAKE([foreign subdir-objects])
 AC_CONFIG_MACRO_DIRS([m4])
@@ -36,6 +37,34 @@ PKG_PROG_PKG_CONFIG
 
 PKG_CHECK_MODULES([LIBJPEG], [libjpeg])
 
+dnl We include cstdio because libjpeg requires us to do it.  As
+dnl described in "libjpeg.txt", section "Mechanics of usage: include
+dnl files, linking, etc":
+dnl
+dnl     Before including jpeglib.h, include system headers that define
+dnl     at least the typedefs FILE and size_t.  On ANSI-conforming
+dnl     systems, including <stdio.h> is sufficient; [...]
+
+AC_CHECK_HEADER([jpeglib.h],
+  [],  dnl do nothing different
+  [AC_MSG_ERROR([Unable to include jpeglib.h])],
+  [[#include <cstdio>]]
+)
+
+dnl Since libjpeg v7, jpeg_component_info has separate
+dnl DCT_h_scaled_size and DCT_v_scaled_size members instead of a
+dnl single DCT_scaled_size member.  Ensure compatibility with libjpeg
+dnl v6b (aka v62) which is still common and the default compatibility
+dnl for libjpeg-turbo.
+AC_CHECK_MEMBER([jpeg_component_info.DCT_scaled_size],
+  [AC_DEFINE([HAVE_JPEG_COMPONENT_INFO_DCT_SCALED_SIZE], 1,
+             [Define to 1 if `DCT_scaled_size' is a member of `jpeg_component_info'.])],
+  [],  dnl HAVE_* will be undef because DCT_scaled has separate hv members
+  [[
+#include <cstdio>
+#include <jpeglib.h>
+]]
+)
 
 dnl There is a series of issues with getting the configuration needed
 dnl for OpenCV:
@@ -67,7 +96,7 @@ dnl temporarily, CXXFLAGS for the test.
 save_CXXFLAGS="$CXXFLAGS"
 CXXFLAGS="$CXXFLAGS $OPENCV_CFLAGS"
 AC_CHECK_HEADER([opencv2/imgproc.hpp],
-  [],  # for now, do nothing different if found
+  [],  dnl for now, do nothing different if found
   [AC_MSG_ERROR([opencv2/imgproc.hpp not found])]
 )
 CXXFLAGS="$save_CXXFLAGS"

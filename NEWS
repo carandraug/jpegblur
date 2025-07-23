@@ -1,6 +1,9 @@
 Summary of changes for version X.Y (upcoming):
 ----------------------------------------------
 
+- Support libjpeg v7 or later (including libjpeg-turbo built to
+  emulate libjpeg v7 or later).
+
 
 Summary of changes for version 1.0 (2024-08-28):
 ------------------------------------------------

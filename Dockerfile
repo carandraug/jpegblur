@@ -5,7 +5,7 @@
 ## notice and this notice are preserved.  This file is offered as-is,
 ## without any warranty.
 
-FROM debian:buster
+FROM debian:bookworm
 
 RUN apt-get update \
     && apt-get install -y \

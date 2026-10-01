@@ -1,0 +1,11 @@
+jpegblur was heavily inspired by libjpeg's jpegtran program, part of
+libjpeg-turbo, which has the following license:
+
+  jpegtran.c
+
+  This file was part of the Independent JPEG Group's software:
+  Copyright (C) 1995-2019, Thomas G. Lane, Guido Vollbeding.
+  libjpeg-turbo Modifications:
+  Copyright (C) 2010, 2014, 2017, 2019-2022, D. R. Commander.
+  For conditions of distribution and use, see the accompanying README.ijg
+  file.
